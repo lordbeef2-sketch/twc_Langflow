@@ -1,0 +1,12 @@
+/.venv/
+/langflow/
+/test-run/
+*.log
+*.pyc
+__pycache__/
+node_modules/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
