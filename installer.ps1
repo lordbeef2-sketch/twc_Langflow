@@ -8,6 +8,12 @@ function Ok([string]$msg) { Write-Host "[installer] $msg" -ForegroundColor Green
 function Warn([string]$msg) { Write-Host "[installer] $msg" -ForegroundColor Yellow }
 function Fail([string]$msg) { Write-Host "[installer] $msg" -ForegroundColor Red; exit 1 }
 
+function Test-IsWindows() {
+  return [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+    [System.Runtime.InteropServices.OSPlatform]::Windows
+  )
+}
+
 function Ensure-Command([string]$name, [string]$installHint) {
   if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
     Fail "Missing required command '$name'. $installHint"
@@ -22,12 +28,49 @@ function Assert-PathWithinRoot([string]$path, [string]$root) {
   }
 }
 
-function Use-LocalVenv([string]$venvPath) {
+function Get-InstallerPythonSpec() {
+  if (-not [string]::IsNullOrWhiteSpace($env:LANGPATCHER_PYTHON)) {
+    return $env:LANGPATCHER_PYTHON
+  }
+
+  return "3.12"
+}
+
+function Configure-UvForWindowsServer() {
+  if ([string]::IsNullOrWhiteSpace($env:UV_TORCH_BACKEND)) {
+    $env:UV_TORCH_BACKEND = "cpu"
+    Info "Using CPU-only PyTorch wheels (UV_TORCH_BACKEND=cpu)"
+  } else {
+    Info "Using existing UV_TORCH_BACKEND=$($env:UV_TORCH_BACKEND)"
+  }
+
+  if (Test-IsWindows) {
+    if ([string]::IsNullOrWhiteSpace($env:UV_NATIVE_TLS)) {
+      $env:UV_NATIVE_TLS = "true"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:UV_SYSTEM_CERTS)) {
+      $env:UV_SYSTEM_CERTS = "true"
+    }
+    Info "Using Windows native/system TLS certificates for uv downloads"
+  }
+}
+
+function Get-UvPipTorchBackendArgs() {
+  $helpText = (& uv pip install --help) -join "`n"
+  if ($helpText -match "--torch-backend") {
+    return @("--torch-backend", "cpu")
+  }
+
+  Warn "This uv version does not support --torch-backend. Falling back to the PyTorch CPU wheel index."
+  return @("--index", "https://download.pytorch.org/whl/cpu")
+}
+
+function Use-LocalVenv([string]$venvPath, [string]$pythonSpec) {
   if (-not (Test-Path $venvPath)) {
-    Info "Creating folder-local Python environment at $venvPath"
-    uv venv $venvPath
+    Info "Creating folder-local Python environment at $venvPath with Python $pythonSpec"
+    uv venv $venvPath --python $pythonSpec
     if ($LASTEXITCODE -ne 0) {
-      Fail "uv venv failed"
+      Fail "uv venv failed. Install Python $pythonSpec with 'uv python install $pythonSpec' or set LANGPATCHER_PYTHON to another supported version, then rerun this installer."
     }
   } else {
     Info "Reusing local Python environment at $venvPath"
@@ -54,11 +97,38 @@ function Assert-SupportedPython() {
 
   $major = [int]$parts[0]
   $minor = [int]$parts[1]
-  if ($major -ne 3 -or $minor -lt 10 -or $minor -gt 13) {
-    Fail "Langflow requires Python 3.10 through 3.13. Detected Python $pythonVersion."
+
+  $maxMinor = 13
+  $supportedRange = "3.10 through 3.13"
+  if (Test-IsWindows) {
+    $maxMinor = 12
+    $supportedRange = "3.10 through 3.12 on Windows"
+  }
+
+  if ($major -ne 3 -or $minor -lt 10 -or $minor -gt $maxMinor) {
+    Fail "Langflow requires Python $supportedRange. Detected Python $pythonVersion. If this is an existing install, delete the local .venv folder or set LANGPATCHER_PYTHON=3.12 and rerun installer.ps1."
   }
 
   Ok "Using Python $pythonVersion in the local environment"
+}
+
+function Install-PytorchRuntime([array]$torchBackendArgs) {
+  $installArgs = @(
+    "pip",
+    "install",
+    "torch",
+    "torchvision",
+    "--only-binary",
+    "torch",
+    "--only-binary",
+    "torchvision"
+  ) + $torchBackendArgs
+
+  Info "Preinstalling CPU-only torch and torchvision wheels"
+  & uv @installArgs
+  if ($LASTEXITCODE -ne 0) {
+    Fail "Failed to install CPU-only torch/torchvision. On Windows Server, verify outbound HTTPS access to pypi.org and download.pytorch.org, update uv, and make sure the local environment is using Python 3.12."
+  }
 }
 
 function Get-InstalledLangflowVersion() {
@@ -139,13 +209,29 @@ Ensure-Command "uv" "Install uv, then rerun this script."
 Ensure-Command "git" "Install Git, then rerun this script."
 Ensure-Command "npm" "Install Node.js and npm, then rerun this script."
 
-Use-LocalVenv $VenvPath
+$PythonSpec = Get-InstallerPythonSpec
+$TorchBackendArgs = Get-UvPipTorchBackendArgs
+Configure-UvForWindowsServer
+
+Use-LocalVenv -venvPath $VenvPath -pythonSpec $PythonSpec
 Assert-SupportedPython
 
+Install-PytorchRuntime -torchBackendArgs $TorchBackendArgs
+
 Info "Installing Langflow into the local environment"
-uv pip install langflow -U
+$langflowInstallArgs = @(
+  "pip",
+  "install",
+  "langflow",
+  "-U",
+  "--only-binary",
+  "torch",
+  "--only-binary",
+  "torchvision"
+) + $TorchBackendArgs
+& uv @langflowInstallArgs
 if ($LASTEXITCODE -ne 0) {
-  Fail "uv pip install langflow -U failed"
+  Fail "uv pip install langflow -U failed. The most common Windows Server cause is an incompatible Python or PyTorch wheel. This installer expects Python 3.12 and CPU torch wheels; delete .venv and rerun if the environment was created before this fix."
 }
 
 $InstalledLangflowVersion = Get-InstalledLangflowVersion
@@ -418,9 +504,9 @@ if (Test-Path $authIndexPath) {
 Info "Syncing Python dependencies for the patched Langflow checkout into the active environment"
 Push-Location $TargetRoot
 try {
-  uv sync --active
+  uv sync --active --no-dev
   if ($LASTEXITCODE -ne 0) {
-    Fail "uv sync --active failed"
+    Fail "uv sync --active --no-dev failed"
   }
 } finally {
   Pop-Location

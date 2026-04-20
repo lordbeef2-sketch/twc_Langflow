@@ -2,6 +2,7 @@
 /langflow/
 /test-run/
 *.log
+*.zip
 *.pyc
 __pycache__/
 node_modules/
