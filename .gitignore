@@ -1,8 +1,6 @@
 /.venv/
 /langflow/
 /test-run/
-/offline_bundle/
-/.offline-build/
 *.log
 *.zip
 *.pyc

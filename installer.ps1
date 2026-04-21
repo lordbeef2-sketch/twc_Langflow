@@ -100,7 +100,7 @@ function Initialize-WindowsServerRuntime([string]$packageRoot) {
 
   $vcRuntime = Join-Path $env:SystemRoot "System32\vcruntime140_1.dll"
   if (-not (Test-Path $vcRuntime)) {
-    Warn "Microsoft Visual C++ 2015-2022 x64 runtime was not detected. If torch imports fail after install, install the VC++ Redistributable."
+    Warn "Microsoft Visual C++ 2015-2022 x64 runtime was not detected. If native Python packages fail after install, install the VC++ Redistributable."
   }
 }
 
@@ -120,94 +120,11 @@ function Get-InstallerPythonSpec() {
   return "3.11"
 }
 
-function Get-OfflineBundle([string]$packageRoot) {
-  $bundleRoot = $env:LANGPATCHER_OFFLINE_BUNDLE
-  if ([string]::IsNullOrWhiteSpace($bundleRoot)) {
-    $bundleRoot = Join-Path $packageRoot "offline_bundle"
-  }
-
-  if (-not [System.IO.Path]::IsPathRooted($bundleRoot)) {
-    $bundleRoot = Join-Path $packageRoot $bundleRoot
-  }
-
-  $manifestPath = Join-Path $bundleRoot "manifest.json"
-  if (-not (Test-Path $manifestPath)) {
-    return [pscustomobject]@{
-      Enabled = $false
-      Root = $bundleRoot
-    }
-  }
-
-  $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
-  $wheelhouse = Join-Path $bundleRoot "python-wheels"
-  $sourceArchive = Join-Path $bundleRoot "langflow-source.zip"
-  $frontendBuildArchive = Join-Path $bundleRoot "frontend-build.zip"
-
-  if (-not (Test-Path $wheelhouse)) {
-    Fail "Offline bundle is missing python-wheels: $wheelhouse"
-  }
-  if (-not (Test-Path $sourceArchive)) {
-    Fail "Offline bundle is missing Langflow source archive: $sourceArchive"
-  }
-
-  $hasFrontendBuild = Test-Path $frontendBuildArchive
-  if (-not $hasFrontendBuild) {
-    Warn "Offline bundle has no frontend-build.zip. The installer will need npm access to build the frontend."
-  }
-
-  Ok "Using offline bundle at $bundleRoot"
-  return [pscustomobject]@{
-    Enabled = $true
-    Root = $bundleRoot
-    Manifest = $manifest
-    Wheelhouse = $wheelhouse
-    SourceArchive = $sourceArchive
-    FrontendBuildArchive = $frontendBuildArchive
-    HasFrontendBuild = $hasFrontendBuild
-  }
-}
-
-function Get-UvOfflineArgs([object]$offlineBundle) {
-  if ($null -eq $offlineBundle -or -not $offlineBundle.Enabled) {
-    return @()
-  }
-
-  return @("--offline", "--no-index", "--find-links", $offlineBundle.Wheelhouse)
-}
-
-function Configure-UvForWindowsServer() {
-  if ([string]::IsNullOrWhiteSpace($env:UV_TORCH_BACKEND)) {
-    $env:UV_TORCH_BACKEND = "cpu"
-    Info "Using CPU-only PyTorch wheels (UV_TORCH_BACKEND=cpu)"
-  } else {
-    Info "Using existing UV_TORCH_BACKEND=$($env:UV_TORCH_BACKEND)"
-  }
-}
-
-function Get-UvPipTorchBackendArgs() {
-  $helpText = (& uv pip install --help) -join "`n"
-  if ($helpText -match "--torch-backend") {
-    return @("--torch-backend", "cpu")
-  }
-
-  Warn "This uv version does not support --torch-backend. Falling back to the PyTorch CPU wheel index."
-  return @("--index", "https://download.pytorch.org/whl/cpu")
-}
-
-function Use-LocalVenv([string]$venvPath, [string]$pythonSpec, [bool]$offlineMode) {
+function Use-LocalVenv([string]$venvPath, [string]$pythonSpec) {
   if (-not (Test-Path $venvPath)) {
     Info "Creating folder-local Python environment at $venvPath with Python $pythonSpec"
-    $venvArgs = @("venv", $venvPath, "--python", $pythonSpec)
-    if ($offlineMode) {
-      $venvArgs += "--no-python-downloads"
-    }
-
-    & uv @venvArgs
+    uv venv $venvPath --python $pythonSpec
     if ($LASTEXITCODE -ne 0) {
-      if ($offlineMode) {
-        Fail "uv venv failed in offline mode. Install Python $pythonSpec on this server first, then delete .venv and rerun installer.ps1."
-      }
-
       Fail "uv venv failed. Install Python $pythonSpec with 'uv python install $pythonSpec' or set LANGPATCHER_PYTHON to another supported version, then rerun this installer."
     }
   } else {
@@ -257,29 +174,6 @@ function Assert-SupportedPython() {
   Ok "Using Python $pythonVersion in the local environment"
 }
 
-function Install-PytorchRuntime([array]$torchBackendArgs, [array]$offlineArgs) {
-  $installArgs = @(
-    "pip",
-    "install",
-    "torch",
-    "torchvision",
-    "--only-binary",
-    "torch",
-    "--only-binary",
-    "torchvision"
-  ) + $torchBackendArgs + $offlineArgs
-
-  Info "Preinstalling CPU-only torch and torchvision wheels"
-  & uv @installArgs
-  if ($LASTEXITCODE -ne 0) {
-    if ($offlineArgs.Count -gt 0) {
-      Fail "Failed to install CPU-only torch/torchvision from the offline bundle. Rebuild the offline bundle on a Windows x64 machine with Python 3.11."
-    }
-
-    Fail "Failed to install CPU-only torch/torchvision. Verify package index access, update uv, and make sure the local environment is using Python 3.11."
-  }
-}
-
 function Get-InstalledLangflowVersion() {
   $version = (& python -c "import importlib.metadata as metadata; print(metadata.version('langflow'))").Trim()
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($version)) {
@@ -312,25 +206,8 @@ function Resolve-LangflowGitRef([string]$version) {
   Fail "Could not resolve a Langflow source ref for version $version"
 }
 
-function Initialize-LangflowCheckout([string]$targetRoot, [string]$gitRef, [string]$sourceArchive) {
+function Initialize-LangflowCheckout([string]$targetRoot, [string]$gitRef) {
   $repoUrl = "https://github.com/langflow-ai/langflow.git"
-
-  if (-not [string]::IsNullOrWhiteSpace($sourceArchive)) {
-    if (-not (Test-Path $sourceArchive)) {
-      Fail "Offline Langflow source archive not found: $sourceArchive"
-    }
-
-    if (-not (Test-Path $targetRoot)) {
-      Info "Extracting offline Langflow source into $targetRoot"
-      New-Item -ItemType Directory -Path $targetRoot -Force | Out-Null
-      Expand-Archive -Path $sourceArchive -DestinationPath $targetRoot -Force
-      Ok "Created Langflow source checkout from offline bundle"
-      return
-    }
-
-    Warn "Existing Langflow source found at $targetRoot. Reusing it as-is."
-    return
-  }
 
   if (-not (Test-Path $targetRoot)) {
     Info "Cloning Langflow source ref '$gitRef' into $targetRoot"
@@ -371,71 +248,29 @@ if (-not (Test-Path $PayloadRoot)) {
   Fail "Missing payload directory: $PayloadRoot"
 }
 
-$OfflineBundle = Get-OfflineBundle -packageRoot $PackageRoot
-$UvOfflineArgs = Get-UvOfflineArgs -offlineBundle $OfflineBundle
-
 Ensure-Command "uv" "Install uv, then rerun this script."
-if (-not $OfflineBundle.Enabled) {
-  Ensure-Command "git" "Install Git, then rerun this script."
-}
-
-$NpmCommand = $null
-if (-not ($OfflineBundle.Enabled -and $OfflineBundle.HasFrontendBuild)) {
-  $NpmCommand = Get-NpmCommand
-  Ensure-Command $NpmCommand "Install Node.js and npm, then rerun this script."
-}
+Ensure-Command "git" "Install Git, then rerun this script."
+$NpmCommand = Get-NpmCommand
+Ensure-Command $NpmCommand "Install Node.js and npm, then rerun this script."
 
 Initialize-WindowsServerRuntime -packageRoot $PackageRoot
 
 $PythonSpec = Get-InstallerPythonSpec
-$TorchBackendArgs = @()
-if (-not $OfflineBundle.Enabled) {
-  $TorchBackendArgs = Get-UvPipTorchBackendArgs
-} else {
-  Info "Offline bundle supplies local Python wheels; package indexes will not be used."
-}
-Configure-UvForWindowsServer
 
-Use-LocalVenv -venvPath $VenvPath -pythonSpec $PythonSpec -offlineMode $OfflineBundle.Enabled
+Use-LocalVenv -venvPath $VenvPath -pythonSpec $PythonSpec
 Assert-SupportedPython
 
-Install-PytorchRuntime -torchBackendArgs $TorchBackendArgs -offlineArgs $UvOfflineArgs
-
-if ($OfflineBundle.Enabled) {
-  $InstalledLangflowVersion = $OfflineBundle.Manifest.langflow_version
-  if ([string]::IsNullOrWhiteSpace($InstalledLangflowVersion)) {
-    $InstalledLangflowVersion = "offline-bundle"
-  }
-  Ok "Using bundled Langflow source for $InstalledLangflowVersion"
-} else {
-  Info "Installing Langflow into the local environment"
-  $langflowInstallArgs = @(
-    "pip",
-    "install",
-    "langflow",
-    "-U",
-    "--only-binary",
-    "torch",
-    "--only-binary",
-    "torchvision"
-  ) + $TorchBackendArgs
-  & uv @langflowInstallArgs
-  if ($LASTEXITCODE -ne 0) {
-    Fail "uv pip install langflow -U failed. The most common Windows Server cause is an incompatible Python or PyTorch wheel. This installer expects Python 3.11 and CPU torch wheels; delete .venv and rerun if the environment was created before this fix."
-  }
-
-  $InstalledLangflowVersion = Get-InstalledLangflowVersion
-  Ok "Installed Langflow $InstalledLangflowVersion into the local environment"
+Info "Installing Langflow into the local environment"
+uv pip install langflow -U
+if ($LASTEXITCODE -ne 0) {
+  Fail "uv pip install langflow -U failed. This installer expects Python 3.11 on Windows; delete .venv and rerun if the environment was created with a different Python version."
 }
 
-$SourceArchive = $null
-if ($OfflineBundle.Enabled) {
-  $SourceRef = $OfflineBundle.Manifest.source_ref
-  $SourceArchive = $OfflineBundle.SourceArchive
-} else {
-  $SourceRef = Resolve-LangflowGitRef $InstalledLangflowVersion
-}
-Initialize-LangflowCheckout -targetRoot $TargetRoot -gitRef $SourceRef -sourceArchive $SourceArchive
+$InstalledLangflowVersion = Get-InstalledLangflowVersion
+Ok "Installed Langflow $InstalledLangflowVersion into the local environment"
+
+$SourceRef = Resolve-LangflowGitRef $InstalledLangflowVersion
+Initialize-LangflowCheckout -targetRoot $TargetRoot -gitRef $SourceRef
 
 $files = @(
   "src/backend/base/langflow/alembic/versions/f4a1c2d3e4b5_add_flow_share_table.py",
@@ -701,8 +536,7 @@ if (Test-Path $authIndexPath) {
 Info "Syncing Python dependencies for the patched Langflow checkout into the active environment"
 Push-Location $TargetRoot
 try {
-  $syncArgs = @("sync", "--active", "--no-dev") + $UvOfflineArgs
-  & uv @syncArgs
+  uv sync --active --no-dev
   if ($LASTEXITCODE -ne 0) {
     Fail "uv sync --active --no-dev failed"
   }
@@ -710,32 +544,21 @@ try {
   Pop-Location
 }
 
-$frontendBuild = Join-Path $TargetRoot "src/frontend/build"
-if ($OfflineBundle.Enabled -and $OfflineBundle.HasFrontendBuild) {
-  Info "Restoring frontend build from offline bundle"
-  if (Test-Path $frontendBuild) {
-    Get-ChildItem -Path $frontendBuild -Force | Remove-Item -Recurse -Force
-  } else {
-    New-Item -ItemType Directory -Path $frontendBuild -Force | Out-Null
+Info "Installing frontend dependencies"
+Push-Location (Join-Path $TargetRoot "src/frontend")
+try {
+  & $NpmCommand install
+  if ($LASTEXITCODE -ne 0) {
+    Fail "npm install failed"
   }
-  Expand-Archive -Path $OfflineBundle.FrontendBuildArchive -DestinationPath $frontendBuild -Force
-} else {
-  Info "Installing frontend dependencies"
-  Push-Location (Join-Path $TargetRoot "src/frontend")
-  try {
-    & $NpmCommand install
-    if ($LASTEXITCODE -ne 0) {
-      Fail "npm install failed"
-    }
 
-    Info "Building frontend"
-    & $NpmCommand run build
-    if ($LASTEXITCODE -ne 0) {
-      Fail "npm run build failed"
-    }
-  } finally {
-    Pop-Location
+  Info "Building frontend"
+  & $NpmCommand run build
+  if ($LASTEXITCODE -ne 0) {
+    Fail "npm run build failed"
   }
+} finally {
+  Pop-Location
 }
 
 Info "Syncing build output to backend static frontend"
