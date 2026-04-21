@@ -9,14 +9,98 @@ function Warn([string]$msg) { Write-Host "[installer] $msg" -ForegroundColor Yel
 function Fail([string]$msg) { Write-Host "[installer] $msg" -ForegroundColor Red; exit 1 }
 
 function Test-IsWindows() {
-  return [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
-    [System.Runtime.InteropServices.OSPlatform]::Windows
-  )
+  return [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
 }
 
 function Ensure-Command([string]$name, [string]$installHint) {
   if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
     Fail "Missing required command '$name'. $installHint"
+  }
+}
+
+function Get-NpmCommand() {
+  if ((Test-IsWindows) -and (Get-Command "npm.cmd" -ErrorAction SilentlyContinue)) {
+    return "npm.cmd"
+  }
+
+  return "npm"
+}
+
+function Get-WindowsProductInfo() {
+  if (-not (Test-IsWindows)) {
+    return $null
+  }
+
+  try {
+    $currentVersion = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+    return [pscustomobject]@{
+      ProductName = $currentVersion.ProductName
+      Build = $currentVersion.CurrentBuildNumber
+      DisplayVersion = $currentVersion.DisplayVersion
+      UBR = $currentVersion.UBR
+    }
+  } catch {
+    Warn "Unable to read Windows version details from the registry. Continuing."
+    return $null
+  }
+}
+
+function Initialize-WindowsServerRuntime([string]$packageRoot) {
+  if (-not (Test-IsWindows)) {
+    return
+  }
+
+  if ([string]::IsNullOrWhiteSpace($env:UV_LINK_MODE)) {
+    $env:UV_LINK_MODE = "copy"
+    Info "Using UV_LINK_MODE=copy to avoid Windows Server hardlink/cache edge cases"
+  }
+
+  if ([string]::IsNullOrWhiteSpace($env:NPM_CONFIG_FUND)) {
+    $env:NPM_CONFIG_FUND = "false"
+  }
+  if ([string]::IsNullOrWhiteSpace($env:NPM_CONFIG_AUDIT)) {
+    $env:NPM_CONFIG_AUDIT = "false"
+  }
+  if ([string]::IsNullOrWhiteSpace($env:NPM_CONFIG_UPDATE_NOTIFIER)) {
+    $env:NPM_CONFIG_UPDATE_NOTIFIER = "false"
+  }
+
+  $windowsInfo = Get-WindowsProductInfo
+  if ($null -ne $windowsInfo) {
+    $windowsLabel = "$($windowsInfo.ProductName) build $($windowsInfo.Build)"
+    if ($null -ne $windowsInfo.UBR) {
+      $windowsLabel = "$windowsLabel.$($windowsInfo.UBR)"
+    }
+
+    if ($windowsInfo.ProductName -match "Windows Server") {
+      $buildNumber = 0
+      [void][int]::TryParse([string]$windowsInfo.Build, [ref]$buildNumber)
+      if ($buildNumber -lt 20348) {
+        Warn "Detected $windowsLabel. This installer is hardened for Windows Server 2022 or newer (build 20348+)."
+      } else {
+        Ok "Detected $windowsLabel"
+      }
+    } else {
+      Info "Detected $windowsLabel"
+    }
+  }
+
+  try {
+    $fileSystem = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem"
+    if ($fileSystem.LongPathsEnabled -ne 1) {
+      Warn "Windows long paths are not enabled. If npm or git fails on long paths, enable 'LongPathsEnabled' or install from a short folder like C:\LangPatcher."
+    }
+  } catch {
+    Warn "Unable to check Windows long-path policy. Continuing."
+  }
+
+  if ($packageRoot.Length -gt 80) {
+    Warn "Install path is long ($packageRoot). Windows Server installs are safer from a short path like C:\LangPatcher."
+  }
+
+  $vcRuntime = Join-Path $env:SystemRoot "System32\vcruntime140_1.dll"
+  if (-not (Test-Path $vcRuntime)) {
+    Warn "Microsoft Visual C++ 2015-2022 x64 runtime was not detected. If torch imports fail after install, install the VC++ Redistributable."
   }
 }
 
@@ -42,16 +126,6 @@ function Configure-UvForWindowsServer() {
     Info "Using CPU-only PyTorch wheels (UV_TORCH_BACKEND=cpu)"
   } else {
     Info "Using existing UV_TORCH_BACKEND=$($env:UV_TORCH_BACKEND)"
-  }
-
-  if (Test-IsWindows) {
-    if ([string]::IsNullOrWhiteSpace($env:UV_NATIVE_TLS)) {
-      $env:UV_NATIVE_TLS = "true"
-    }
-    if ([string]::IsNullOrWhiteSpace($env:UV_SYSTEM_CERTS)) {
-      $env:UV_SYSTEM_CERTS = "true"
-    }
-    Info "Using Windows native/system TLS certificates for uv downloads"
   }
 }
 
@@ -175,7 +249,7 @@ function Initialize-LangflowCheckout([string]$targetRoot, [string]$gitRef) {
 
   if (-not (Test-Path $targetRoot)) {
     Info "Cloning Langflow source ref '$gitRef' into $targetRoot"
-    git clone --depth 1 --branch $gitRef $repoUrl $targetRoot
+    git -c core.longpaths=true clone --depth 1 --branch $gitRef $repoUrl $targetRoot
     if ($LASTEXITCODE -ne 0) {
       Fail "git clone failed"
     }
@@ -214,7 +288,10 @@ if (-not (Test-Path $PayloadRoot)) {
 
 Ensure-Command "uv" "Install uv, then rerun this script."
 Ensure-Command "git" "Install Git, then rerun this script."
-Ensure-Command "npm" "Install Node.js and npm, then rerun this script."
+$NpmCommand = Get-NpmCommand
+Ensure-Command $NpmCommand "Install Node.js and npm, then rerun this script."
+
+Initialize-WindowsServerRuntime -packageRoot $PackageRoot
 
 $PythonSpec = Get-InstallerPythonSpec
 $TorchBackendArgs = Get-UvPipTorchBackendArgs
@@ -522,13 +599,13 @@ try {
 Info "Installing frontend dependencies"
 Push-Location (Join-Path $TargetRoot "src/frontend")
 try {
-  npm install
+  & $NpmCommand install
   if ($LASTEXITCODE -ne 0) {
     Fail "npm install failed"
   }
 
   Info "Building frontend"
-  npm run build
+  & $NpmCommand run build
   if ($LASTEXITCODE -ne 0) {
     Fail "npm run build failed"
   }
