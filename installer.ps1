@@ -33,7 +33,7 @@ function Get-InstallerPythonSpec() {
     return $env:LANGPATCHER_PYTHON
   }
 
-  return "3.12"
+  return "3.11"
 }
 
 function Configure-UvForWindowsServer() {
@@ -98,15 +98,22 @@ function Assert-SupportedPython() {
   $major = [int]$parts[0]
   $minor = [int]$parts[1]
 
+  $minMinor = 10
   $maxMinor = 13
+  $requiredMinor = $null
   $supportedRange = "3.10 through 3.13"
   if (Test-IsWindows) {
-    $maxMinor = 12
-    $supportedRange = "3.10 through 3.12 on Windows"
+    $requiredMinor = 11
+    $supportedRange = "3.11 on Windows"
   }
 
-  if ($major -ne 3 -or $minor -lt 10 -or $minor -gt $maxMinor) {
-    Fail "Langflow requires Python $supportedRange. Detected Python $pythonVersion. If this is an existing install, delete the local .venv folder or set LANGPATCHER_PYTHON=3.12 and rerun installer.ps1."
+  if (
+    $major -ne 3 -or
+    $minor -lt $minMinor -or
+    $minor -gt $maxMinor -or
+    ($null -ne $requiredMinor -and $minor -ne $requiredMinor)
+  ) {
+    Fail "Langflow requires Python $supportedRange. Detected Python $pythonVersion. If this is an existing install, delete the local .venv folder or set LANGPATCHER_PYTHON=3.11 and rerun installer.ps1."
   }
 
   Ok "Using Python $pythonVersion in the local environment"
@@ -127,7 +134,7 @@ function Install-PytorchRuntime([array]$torchBackendArgs) {
   Info "Preinstalling CPU-only torch and torchvision wheels"
   & uv @installArgs
   if ($LASTEXITCODE -ne 0) {
-    Fail "Failed to install CPU-only torch/torchvision. On Windows Server, verify outbound HTTPS access to pypi.org and download.pytorch.org, update uv, and make sure the local environment is using Python 3.12."
+    Fail "Failed to install CPU-only torch/torchvision. On Windows Server, verify outbound HTTPS access to pypi.org and download.pytorch.org, update uv, and make sure the local environment is using Python 3.11."
   }
 }
 
@@ -231,7 +238,7 @@ $langflowInstallArgs = @(
 ) + $TorchBackendArgs
 & uv @langflowInstallArgs
 if ($LASTEXITCODE -ne 0) {
-  Fail "uv pip install langflow -U failed. The most common Windows Server cause is an incompatible Python or PyTorch wheel. This installer expects Python 3.12 and CPU torch wheels; delete .venv and rerun if the environment was created before this fix."
+  Fail "uv pip install langflow -U failed. The most common Windows Server cause is an incompatible Python or PyTorch wheel. This installer expects Python 3.11 and CPU torch wheels; delete .venv and rerun if the environment was created before this fix."
 }
 
 $InstalledLangflowVersion = Get-InstalledLangflowVersion
