@@ -160,15 +160,27 @@ def _build_saml_metadata(config: SSOConfig) -> str:
                 else ""
         )
 
+        sso_service = ""
+        if idp_sso_url:
+                sso_service = (
+                        '<SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" '
+                        f'Location="{xml_escape(idp_sso_url)}" />'
+                )
+
+        slo_service = ""
+        if idp_slo_url:
+                slo_service = (
+                        '<SingleLogoutService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" '
+                        f'Location="{xml_escape(idp_slo_url)}" />'
+                )
+
         idp_descriptor = ""
         if idp_entity_id or idp_sso_url or idp_slo_url:
-                idp_descriptor = (
-                        f"""
-    <IDPSSODescriptor protocolSupportEnumeration=\"urn:oasis:names:tc:SAML:2.0:protocol\">
-        {f'<SingleSignOnService Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect\" Location=\"{xml_escape(idp_sso_url)}\" />' if idp_sso_url else ''}
-        {f'<SingleLogoutService Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect\" Location=\"{xml_escape(idp_slo_url)}\" />' if idp_slo_url else ''}
+                idp_descriptor = f"""
+    <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+        {sso_service}
+        {slo_service}
     </IDPSSODescriptor>"""
-                )
 
         return f"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <EntityDescriptor xmlns=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"{xml_escape(entity_id)}\">

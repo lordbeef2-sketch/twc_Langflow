@@ -16,104 +16,15 @@ function Test-IsWindows() {
   return [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
 }
 
-function Ensure-Command([string]$name, [string]$installHint) {
-  if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
-    Fail "Missing required command '$name'. $installHint"
-  }
-}
+function Get-ManualInstallHint() {
+  return @"
+Run these commands from this folder first:
+1) uv venv .venv
+2) .\.venv\Scripts\Activate.ps1
+3) uv pip install langflow -U
 
-function Get-NpmCommand() {
-  if ((Test-IsWindows) -and (Get-Command "npm.cmd" -ErrorAction SilentlyContinue)) {
-    return "npm.cmd"
-  }
-
-  return "npm"
-}
-
-function Get-WindowsProductInfo() {
-  if (-not (Test-IsWindows)) {
-    return $null
-  }
-
-  try {
-    $currentVersion = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
-    return [pscustomobject]@{
-      ProductName = $currentVersion.ProductName
-      Build = $currentVersion.CurrentBuildNumber
-      DisplayVersion = $currentVersion.DisplayVersion
-      UBR = $currentVersion.UBR
-    }
-  } catch {
-    Warn "Unable to read Windows version details from the registry. Continuing."
-    return $null
-  }
-}
-
-function Initialize-WindowsServerRuntime([string]$packageRoot) {
-  if (-not (Test-IsWindows)) {
-    return
-  }
-
-  if ([string]::IsNullOrWhiteSpace($env:UV_LINK_MODE)) {
-    $env:UV_LINK_MODE = "copy"
-    Info "Using UV_LINK_MODE=copy to avoid Windows Server hardlink/cache edge cases"
-  }
-
-  if ([string]::IsNullOrWhiteSpace($env:NPM_CONFIG_FUND)) {
-    $env:NPM_CONFIG_FUND = "false"
-  }
-  if ([string]::IsNullOrWhiteSpace($env:NPM_CONFIG_AUDIT)) {
-    $env:NPM_CONFIG_AUDIT = "false"
-  }
-  if ([string]::IsNullOrWhiteSpace($env:NPM_CONFIG_UPDATE_NOTIFIER)) {
-    $env:NPM_CONFIG_UPDATE_NOTIFIER = "false"
-  }
-
-  $windowsInfo = Get-WindowsProductInfo
-  if ($null -ne $windowsInfo) {
-    $windowsLabel = "$($windowsInfo.ProductName) build $($windowsInfo.Build)"
-    if ($null -ne $windowsInfo.UBR) {
-      $windowsLabel = "$windowsLabel.$($windowsInfo.UBR)"
-    }
-
-    if ($windowsInfo.ProductName -match "Windows Server") {
-      $buildNumber = 0
-      [void][int]::TryParse([string]$windowsInfo.Build, [ref]$buildNumber)
-      if ($buildNumber -lt 20348) {
-        Warn "Detected $windowsLabel. This installer is hardened for Windows Server 2022 or newer (build 20348+)."
-      } else {
-        Ok "Detected $windowsLabel"
-      }
-    } else {
-      Info "Detected $windowsLabel"
-    }
-  }
-
-  try {
-    $fileSystem = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem"
-    if ($fileSystem.LongPathsEnabled -ne 1) {
-      Warn "Windows long paths are not enabled. If npm or git fails on long paths, enable 'LongPathsEnabled' or install from a short folder like C:\LangPatcher."
-    }
-  } catch {
-    Warn "Unable to check Windows long-path policy. Continuing."
-  }
-
-  if ($packageRoot.Length -gt 80) {
-    Warn "Install path is long ($packageRoot). Windows Server installs are safer from a short path like C:\LangPatcher."
-  }
-
-  $vcRuntime = Join-Path $env:SystemRoot "System32\vcruntime140_1.dll"
-  if (-not (Test-Path $vcRuntime)) {
-    Warn "Microsoft Visual C++ 2015-2022 x64 runtime was not detected. If native Python packages fail after install, install the VC++ Redistributable."
-  }
-}
-
-function Assert-PathWithinRoot([string]$path, [string]$root) {
-  $resolvedPath = [System.IO.Path]::GetFullPath($path)
-  $resolvedRoot = [System.IO.Path]::GetFullPath($root)
-  if (-not $resolvedPath.StartsWith($resolvedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-    Fail "Refusing to modify path outside target root: $resolvedPath"
-  }
+Then rerun .\installer.ps1.
+"@
 }
 
 function Get-RelativePath([string]$root, [string]$path) {
@@ -131,6 +42,14 @@ function Get-RelativePath([string]$root, [string]$path) {
   $pathUri = [System.Uri]::new($resolvedPath)
   $relativeUri = $rootUri.MakeRelativeUri($pathUri)
   return [System.Uri]::UnescapeDataString($relativeUri.ToString()).Replace("/", [System.IO.Path]::DirectorySeparatorChar)
+}
+
+function Assert-PathWithinRoot([string]$path, [string]$root) {
+  $resolvedPath = [System.IO.Path]::GetFullPath($path)
+  $resolvedRoot = [System.IO.Path]::GetFullPath($root)
+  if (-not $resolvedPath.StartsWith($resolvedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    Fail "Refusing to modify path outside target root: $resolvedPath"
+  }
 }
 
 function Get-FileSha256([string]$path) {
@@ -167,7 +86,7 @@ function Read-InstallState([string]$path) {
   try {
     return Get-Content -Path $path -Raw | ConvertFrom-Json
   } catch {
-    Warn "Install state file is invalid at $path. Rebuilding generated assets."
+    Warn "Install state file is invalid at $path. Reapplying patch."
     return $null
   }
 }
@@ -176,7 +95,8 @@ function Write-InstallState(
   [string]$path,
   [string]$pythonVersion,
   [string]$langflowVersion,
-  [string]$sourceRef,
+  [string]$langflowRoot,
+  [string]$lfxRoot,
   [string]$payloadFingerprint,
   [string]$installerFingerprint
 ) {
@@ -186,10 +106,11 @@ function Write-InstallState(
   }
 
   $state = [ordered]@{
-    stateVersion = 1
+    stateVersion = 2
     pythonVersion = $pythonVersion
     langflowVersion = $langflowVersion
-    sourceRef = $sourceRef
+    langflowRoot = $langflowRoot
+    lfxRoot = $lfxRoot
     payloadFingerprint = $payloadFingerprint
     installerFingerprint = $installerFingerprint
     updatedAt = (Get-Date).ToString("o")
@@ -198,66 +119,17 @@ function Write-InstallState(
   $state | ConvertTo-Json | Set-Content -Path $path -NoNewline
 }
 
-function Invoke-NpmBuild([string]$npmCommand) {
-  $previousErrorActionPreference = $ErrorActionPreference
-  $buildOutput = @()
-  $exitCode = 0
-
-  try {
-    $ErrorActionPreference = "Continue"
-    $buildOutput = & $npmCommand run build 2>&1
-    $exitCode = $LASTEXITCODE
-  } finally {
-    $ErrorActionPreference = $previousErrorActionPreference
-  }
-
-  foreach ($line in @($buildOutput)) {
-    Write-Host ([string]$line)
-  }
-
-  return [pscustomobject]@{
-    ExitCode = $exitCode
-    Output = @($buildOutput)
-  }
-}
-
-function Test-SwcNativeBindingFailure([object[]]$output) {
-  if ($null -eq $output -or $output.Count -eq 0) {
-    return $false
-  }
-
-  $text = [string]::Join("`n", @($output))
-  return (
-    $text -match "Failed to load native binding" -or
-    $text -match "@swc/core" -or
-    $text -match "not a valid Win32 application"
-  )
-}
-
-function Get-InstallerPythonSpec() {
-  if (-not [string]::IsNullOrWhiteSpace($env:LANGPATCHER_PYTHON)) {
-    return $env:LANGPATCHER_PYTHON
-  }
-
-  return "3.11"
-}
-
-function Use-LocalVenv([string]$venvPath, [string]$pythonSpec) {
+function Use-ExistingLocalVenv([string]$venvPath) {
   if (-not (Test-Path $venvPath)) {
-    Info "Creating folder-local Python environment at $venvPath with Python $pythonSpec"
-    uv venv $venvPath --python $pythonSpec
-    if ($LASTEXITCODE -ne 0) {
-      Fail "uv venv failed. Install Python $pythonSpec with 'uv python install $pythonSpec' or set LANGPATCHER_PYTHON to another supported version, then rerun this installer."
-    }
-  } else {
-    Info "Reusing local Python environment at $venvPath"
+    Fail ("Missing local .venv.`n`n" + (Get-ManualInstallHint))
   }
 
   $activateScript = Join-Path $venvPath "Scripts\Activate.ps1"
   if (-not (Test-Path $activateScript)) {
-    Fail "Missing activation script: $activateScript"
+    Fail ("Missing activation script: $activateScript`n`n" + (Get-ManualInstallHint))
   }
 
+  Info "Reusing local Python environment at $venvPath"
   . $activateScript
 }
 
@@ -266,6 +138,7 @@ function Assert-SupportedPython() {
   if ($LASTEXITCODE -ne 0 -or $null -eq $pythonVersionOutput) {
     Fail "Unable to determine the Python version in the local environment"
   }
+
   $pythonVersion = ([string]::Join("`n", @($pythonVersionOutput))).Trim()
   if ([string]::IsNullOrWhiteSpace($pythonVersion)) {
     Fail "Unable to determine the Python version in the local environment"
@@ -278,11 +151,11 @@ function Assert-SupportedPython() {
 
   $major = [int]$parts[0]
   $minor = [int]$parts[1]
-
   $minMinor = 10
   $maxMinor = 13
   $requiredMinor = $null
   $supportedRange = "3.10 through 3.13"
+
   if (Test-IsWindows) {
     $requiredMinor = 11
     $supportedRange = "3.11 on Windows"
@@ -294,513 +167,208 @@ function Assert-SupportedPython() {
     $minor -gt $maxMinor -or
     ($null -ne $requiredMinor -and $minor -ne $requiredMinor)
   ) {
-    Fail "Langflow requires Python $supportedRange. Detected Python $pythonVersion. If this is an existing install, delete the local .venv folder or set LANGPATCHER_PYTHON=3.11 and rerun installer.ps1."
+    Fail "Langflow requires Python $supportedRange. Detected Python $pythonVersion."
   }
 
   Ok "Using Python $pythonVersion in the local environment"
   return $pythonVersion
 }
 
-function Try-Get-InstalledLangflowVersion() {
-  $versionOutput = & python -c "import importlib.util; import importlib.metadata as metadata; print(metadata.version('langflow') if importlib.util.find_spec('langflow') else '')"
-  if ($LASTEXITCODE -ne 0 -or $null -eq $versionOutput) {
-    return $null
+function Get-InstalledPackageLayout() {
+  $script = @'
+import importlib.metadata as metadata
+import importlib.util
+import json
+from pathlib import Path
+
+payload = {"installed": False}
+
+if importlib.util.find_spec("langflow") is not None and importlib.util.find_spec("lfx") is not None:
+    import langflow
+    import lfx
+
+    payload = {
+        "installed": True,
+        "langflowVersion": metadata.version("langflow"),
+        "langflowRoot": str(Path(langflow.__file__).resolve().parent),
+        "lfxRoot": str(Path(lfx.__file__).resolve().parent),
+    }
+
+print(json.dumps(payload))
+'@
+
+  $layoutOutput = $script | & python -
+  if ($LASTEXITCODE -ne 0 -or $null -eq $layoutOutput) {
+    Fail ("Unable to inspect the installed Langflow package.`n`n" + (Get-ManualInstallHint))
   }
 
-  $version = ([string]::Join("`n", @($versionOutput))).Trim()
-  if ([string]::IsNullOrWhiteSpace($version)) {
-    return $null
+  $layoutJson = ([string]::Join("`n", @($layoutOutput))).Trim()
+  if ([string]::IsNullOrWhiteSpace($layoutJson)) {
+    Fail ("Unable to inspect the installed Langflow package.`n`n" + (Get-ManualInstallHint))
   }
 
-  return $version
+  $layout = $layoutJson | ConvertFrom-Json
+  if (-not $layout.installed) {
+    Fail ("Langflow is not installed in this local environment.`n`n" + (Get-ManualInstallHint))
+  }
+
+  return $layout
 }
 
-function Get-InstalledLangflowVersion() {
-  $version = Try-Get-InstalledLangflowVersion
-  if ([string]::IsNullOrWhiteSpace($version)) {
-    Fail "Unable to determine the installed Langflow version"
+function Copy-Tree([string]$sourceRoot, [string]$destinationRoot) {
+  if (-not (Test-Path $sourceRoot)) {
+    Fail "Missing payload directory: $sourceRoot"
   }
-  return $version
+
+  if (-not (Test-Path $destinationRoot)) {
+    New-Item -ItemType Directory -Path $destinationRoot -Force | Out-Null
+  }
+
+  $copied = 0
+  foreach ($file in Get-ChildItem -Path $sourceRoot -Recurse -File | Sort-Object FullName) {
+    $relativePath = Get-RelativePath -root $sourceRoot -path $file.FullName
+    $destinationPath = Join-Path $destinationRoot $relativePath
+    $destinationDir = Split-Path -Parent $destinationPath
+
+    Assert-PathWithinRoot -path $destinationPath -root $destinationRoot
+
+    if (-not (Test-Path $destinationDir)) {
+      New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
+    }
+
+    Copy-Item -Path $file.FullName -Destination $destinationPath -Force
+    $copied++
+  }
+
+  return $copied
 }
 
-function Resolve-LangflowGitRef([string]$version) {
-  $repoUrl = "https://github.com/langflow-ai/langflow.git"
-  $candidates = @(
-    "release-$version",
-    "v$version",
-    $version,
-    "main"
-  )
+function Install-FrontendBundle([string]$bundlePath, [string]$destinationRoot) {
+  if (-not (Test-Path $bundlePath)) {
+    Fail "Missing built frontend bundle: $bundlePath"
+  }
 
-  foreach ($candidate in $candidates) {
-    $matches = (& git ls-remote --heads --tags $repoUrl $candidate)
-    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($matches -join ""))) {
-      if ($candidate -eq "main") {
-        Warn "Could not find a release ref for Langflow $version. Falling back to '$candidate'."
-      } else {
-        Ok "Matched Langflow source ref '$candidate'"
-      }
-      return $candidate
+  if (-not (Test-Path $destinationRoot)) {
+    New-Item -ItemType Directory -Path $destinationRoot -Force | Out-Null
+  }
+
+  $extractRoot = Join-Path $env:TEMP ("langpatcher-frontend-" + [guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+
+  try {
+    Expand-Archive -LiteralPath $bundlePath -DestinationPath $extractRoot -Force
+
+    Assert-PathWithinRoot -path $destinationRoot -root $destinationRoot
+    Get-ChildItem -Path $destinationRoot -Force | Remove-Item -Recurse -Force
+    Copy-Item -Path (Join-Path $extractRoot "*") -Destination $destinationRoot -Recurse -Force
+  } finally {
+    if (Test-Path $extractRoot) {
+      Remove-Item -Recurse -Force $extractRoot
     }
   }
 
-  Fail "Could not resolve a Langflow source ref for version $version"
+  return (Get-ChildItem -Path $destinationRoot -Recurse -File | Measure-Object).Count
 }
 
-function Initialize-LangflowCheckout([string]$targetRoot, [string]$gitRef) {
-  $repoUrl = "https://github.com/langflow-ai/langflow.git"
+function Ensure-EnvSetting([string]$envFile, [string]$key, [string]$value) {
+  $line = "$key=$value"
 
-  if (-not (Test-Path $targetRoot)) {
-    Info "Cloning Langflow source ref '$gitRef' into $targetRoot"
-    git -c core.longpaths=true clone --depth 1 --branch $gitRef $repoUrl $targetRoot
-    if ($LASTEXITCODE -ne 0) {
-      Fail "git clone failed"
+  if (Test-Path $envFile) {
+    $envContent = Get-Content -Path $envFile -Raw
+    if ($envContent -match "(?m)^\s*$key\s*=") {
+      $updated = [regex]::Replace(
+        $envContent,
+        "(?m)^\s*$key\s*=.*$",
+        $line
+      )
+      Set-Content -Path $envFile -Value $updated -NoNewline
+      return
     }
-    Ok "Created Langflow source checkout"
+
+    $trimmed = $envContent.TrimEnd("`r", "`n")
+    if ($trimmed.Length -gt 0) {
+      $trimmed = $trimmed + "`r`n"
+    }
+    Set-Content -Path $envFile -Value ($trimmed + $line + "`r`n") -NoNewline
     return
   }
 
-  $gitDir = Join-Path $targetRoot ".git"
-  if (-not (Test-Path $gitDir)) {
-    Fail "Target directory already exists and is not a git checkout: $targetRoot"
-  }
-
-  Warn "Existing Langflow checkout found at $targetRoot. Reusing it as-is."
-
-  Push-Location $targetRoot
-  try {
-    $currentBranchOutput = & git branch --show-current
-    $currentBranch = if ($null -eq $currentBranchOutput) {
-      ""
-    } else {
-      ([string]::Join("`n", @($currentBranchOutput))).Trim()
-    }
-    if (-not [string]::IsNullOrWhiteSpace($currentBranch) -and $currentBranch -ne $gitRef) {
-      Warn "Current checkout is on '$currentBranch' instead of '$gitRef'. Continuing without switching branches."
-    }
-  } finally {
-    Pop-Location
-  }
+  Set-Content -Path $envFile -Value ($line + "`r`n") -NoNewline
 }
 
 $PackageRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $PackageRoot
 
 $PayloadRoot = Join-Path $PackageRoot "patcher_payload"
+$BackendPayloadRoot = Join-Path $PayloadRoot "src\backend\base\langflow"
+$LfxPayloadRoot = Join-Path $PayloadRoot "src\lfx\src\lfx"
+$FrontendBundlePath = Join-Path $PayloadRoot "frontend_build.zip"
 $VenvPath = Join-Path $PackageRoot ".venv"
-$TargetRoot = Join-Path $PackageRoot "langflow"
 $StateFile = Join-Path $VenvPath "langpatcher-state.json"
+$EnvFile = Join-Path $PackageRoot ".env"
 
 if (-not (Test-Path $PayloadRoot)) {
   Fail "Missing payload directory: $PayloadRoot"
 }
 
-Ensure-Command "uv" "Install uv, then rerun this script."
-Ensure-Command "git" "Install Git, then rerun this script."
-$NpmCommand = Get-NpmCommand
-Ensure-Command $NpmCommand "Install Node.js and npm, then rerun this script."
-
-Initialize-WindowsServerRuntime -packageRoot $PackageRoot
-
-$PythonSpec = Get-InstallerPythonSpec
-
-Use-LocalVenv -venvPath $VenvPath -pythonSpec $PythonSpec
+Use-ExistingLocalVenv -venvPath $VenvPath
 $PythonVersion = Assert-SupportedPython
+$Layout = Get-InstalledPackageLayout
+$InstalledLangflowVersion = [string]$Layout.langflowVersion
+$LangflowRoot = [string]$Layout.langflowRoot
+$LfxRoot = [string]$Layout.lfxRoot
 $PayloadFingerprint = Get-DirectoryFingerprint $PayloadRoot
 $InstallerFingerprint = Get-FileSha256 $MyInvocation.MyCommand.Path
 $InstallState = Read-InstallState $StateFile
-$InstalledLangflowVersion = Try-Get-InstalledLangflowVersion
-$HasGitCheckout = (Test-Path $TargetRoot) -and (Test-Path (Join-Path $TargetRoot ".git"))
 
 if ($Force) {
-  Warn "Force mode enabled. LangPatcher will rebuild generated assets and resync dependencies."
+  Warn "Force mode enabled. LangPatcher will reapply all patch files."
 }
 
 $HasMatchingPatchedInstall = (
   -not $Force -and
   $null -ne $InstallState -and
-  -not [string]::IsNullOrWhiteSpace($InstalledLangflowVersion) -and
   $InstallState.pythonVersion -eq $PythonVersion -and
   $InstallState.langflowVersion -eq $InstalledLangflowVersion -and
+  $InstallState.langflowRoot -eq $LangflowRoot -and
+  $InstallState.lfxRoot -eq $LfxRoot -and
   $InstallState.payloadFingerprint -eq $PayloadFingerprint -and
   $InstallState.installerFingerprint -eq $InstallerFingerprint -and
-  $HasGitCheckout
+  (Test-Path $LangflowRoot) -and
+  (Test-Path $LfxRoot)
 )
 
 if ($HasMatchingPatchedInstall) {
-  Ok "LangPatcher is already applied for Langflow $InstalledLangflowVersion. Skipping reinstall and rebuild."
+  Ok "LangPatcher is already applied for Langflow $InstalledLangflowVersion. Skipping patch."
   Write-Host "Run: .\launcher.ps1" -ForegroundColor White
   exit 0
 }
 
-if ([string]::IsNullOrWhiteSpace($InstalledLangflowVersion)) {
-  Info "Installing Langflow into the local environment"
-  uv pip install langflow -U
-  if ($LASTEXITCODE -ne 0) {
-    Fail "uv pip install langflow -U failed. This installer expects Python 3.11 on Windows; delete .venv and rerun if the environment was created with a different Python version."
-  }
+Info "Applying backend patch files to $LangflowRoot"
+$backendCopied = Copy-Tree -sourceRoot $BackendPayloadRoot -destinationRoot $LangflowRoot
+Ok "Copied $backendCopied backend files"
 
-  $InstalledLangflowVersion = Get-InstalledLangflowVersion
-  Ok "Installed Langflow $InstalledLangflowVersion into the local environment"
-} else {
-  Ok "Reusing Langflow $InstalledLangflowVersion already installed in the local environment"
-}
+Info "Applying LFX patch files to $LfxRoot"
+$lfxCopied = Copy-Tree -sourceRoot $LfxPayloadRoot -destinationRoot $LfxRoot
+Ok "Copied $lfxCopied LFX files"
 
-$HasSyncedCheckout = (
-  -not $Force -and
-  $null -ne $InstallState -and
-  $InstallState.pythonVersion -eq $PythonVersion -and
-  $InstallState.langflowVersion -eq $InstalledLangflowVersion -and
-  $HasGitCheckout -and
-  -not [string]::IsNullOrWhiteSpace([string]$InstallState.sourceRef)
-)
+$InstalledFrontendRoot = Join-Path $LangflowRoot "frontend"
+Info "Replacing built frontend assets in $InstalledFrontendRoot"
+$frontendFiles = Install-FrontendBundle -bundlePath $FrontendBundlePath -destinationRoot $InstalledFrontendRoot
+Ok "Installed $frontendFiles frontend files"
 
-if ($HasSyncedCheckout) {
-  $SourceRef = [string]$InstallState.sourceRef
-  Info "Reusing existing Langflow checkout for ref '$SourceRef'"
-} else {
-  $SourceRef = Resolve-LangflowGitRef $InstalledLangflowVersion
-  Initialize-LangflowCheckout -targetRoot $TargetRoot -gitRef $SourceRef
-}
+Info "Ensuring LANGFLOW_AUTO_LOGIN=false in $EnvFile"
+Ensure-EnvSetting -envFile $EnvFile -key "LANGFLOW_AUTO_LOGIN" -value "false"
+Ok "Configured .env with LANGFLOW_AUTO_LOGIN=false"
 
-$files = @(
-  "src/backend/base/langflow/alembic/versions/f4a1c2d3e4b5_add_flow_share_table.py",
-  "src/backend/base/langflow/api/v1/sso.py",
-  "src/backend/base/langflow/api/v1/admin_settings.py",
-  "src/backend/base/langflow/api/v1/__init__.py",
-  "src/backend/base/langflow/api/router.py",
-  "src/backend/base/langflow/api/v1/flows.py",
-  "src/backend/base/langflow/api/v1/flows_helpers.py",
-  "src/backend/base/langflow/api/v1/schemas/__init__.py",
-  "src/backend/base/langflow/api/v1/users.py",
-  "src/backend/base/langflow/main.py",
-  "src/backend/base/langflow/services/database/models/__init__.py",
-  "src/backend/base/langflow/services/database/models/flow/model.py",
-  "src/backend/base/langflow/services/database/models/flow_share/__init__.py",
-  "src/backend/base/langflow/services/database/models/flow_share/model.py",
-  "src/lfx/src/lfx/services/settings/base.py",
-  "src/frontend/src/components/core/appHeaderComponent/index.tsx",
-  "src/frontend/src/components/core/appHeaderComponent/components/FlowMenu/index.tsx",
-  "src/frontend/src/pages/SettingsPage/pages/GeneralPage/components/SsoSettingsCard/index.tsx",
-  "src/frontend/src/components/core/flowSettingsComponent/index.tsx",
-  "src/frontend/src/components/core/flowToolbarComponent/components/deploy-dropdown.tsx",
-  "src/frontend/src/components/core/flowShareInvitePrompt/index.tsx",
-  "src/frontend/src/components/core/folderSidebarComponent/components/sideBarFolderButtons/components/input-edit-folder-name.tsx",
-  "src/frontend/src/pages/SettingsPage/pages/OAuthSSOPage/index.tsx",
-  "src/frontend/src/pages/SettingsPage/pages/SAMLSSOPage/index.tsx",
-  "src/frontend/src/pages/SettingsPage/pages/HTTPSPage/index.tsx",
-  "src/frontend/src/pages/SettingsPage/index.tsx",
-  "src/frontend/src/routes.tsx",
-  "src/frontend/src/pages/SettingsPage/pages/GeneralPage/index.tsx",
-  "src/frontend/src/pages/SettingsPage/pages/GeneralPage/components/AuthSecuritySettingsCard/index.tsx",
-  "src/frontend/src/pages/AppInitPage/index.tsx",
-  "src/frontend/src/modals/flowShareModal/index.tsx",
-  "src/frontend/src/modals/saveChangesModal/index.tsx",
-  "src/frontend/src/hooks/flows/use-save-flow.ts",
-  "src/frontend/src/pages/FlowPage/index.tsx",
-  "src/frontend/src/pages/FlowPage/components/PageComponent/index.tsx",
-  "src/frontend/src/pages/MainPage/components/dropdown/index.tsx",
-  "src/frontend/src/pages/MainPage/components/list/index.tsx",
-  "src/frontend/src/pages/MainPage/entities/index.tsx",
-  "src/frontend/src/pages/MainPage/pages/empty-page.tsx",
-  "src/frontend/src/pages/MainPage/pages/homePage/index.tsx",
-  "src/frontend/src/pages/MainPage/pages/homePage/utils/isFolderEmpty.ts",
-  "src/frontend/src/pages/MainPage/pages/main-page-utils.ts",
-  "src/frontend/src/controllers/API/index.ts",
-  "src/frontend/src/pages/FlowPage/components/UpdateAllComponents/index.tsx",
-  "src/frontend/src/CustomNodes/GenericNode/index.tsx",
-  "src/frontend/src/controllers/API/helpers/constants.ts",
-  "src/frontend/src/controllers/API/queries/config/use-get-config.ts",
-  "src/frontend/src/controllers/API/queries/auth/use-get-sso-config.ts",
-  "src/frontend/src/controllers/API/queries/auth/use-get-sso-providers.ts",
-  "src/frontend/src/controllers/API/queries/auth/use-get-shareable-users.ts",
-  "src/frontend/src/controllers/API/queries/auth/use-put-sso-config.ts",
-  "src/frontend/src/controllers/API/queries/auth/use-get-saml-metadata.ts",
-  "src/frontend/src/controllers/API/queries/auth/use-get-https-settings.ts",
-  "src/frontend/src/controllers/API/queries/auth/use-put-https-settings.ts",
-  "src/frontend/src/controllers/API/queries/auth/use-post-https-file-upload.ts",
-  "src/frontend/src/controllers/API/queries/auth/use-get-sso-settings.ts",
-  "src/frontend/src/controllers/API/queries/auth/use-put-sso-settings.ts",
-  "src/frontend/src/controllers/API/queries/auth/index.ts",
-  "src/frontend/src/controllers/API/queries/folders/use-get-folder.ts",
-  "src/frontend/src/controllers/API/queries/folders/use-get-folders.ts",
-  "src/frontend/src/controllers/API/queries/flows/use-create-flow-shares.ts",
-  "src/frontend/src/controllers/API/queries/flows/use-get-incoming-flow-shares.ts",
-  "src/frontend/src/controllers/API/queries/flows/use-respond-to-flow-share.ts",
-  "src/frontend/src/components/core/appHeaderComponent/components/AccountMenu/index.tsx",
-  "src/frontend/src/components/core/appHeaderComponent/components/langflow-counts.tsx",
-  "src/frontend/src/components/core/folderSidebarComponent/components/sideBarFolderButtons/components/get-started-progress.tsx",
-  "src/frontend/src/components/core/folderSidebarComponent/components/sideBarFolderButtons/components/header-buttons.tsx",
-  "src/frontend/src/components/core/folderSidebarComponent/components/sideBarFolderButtons/components/select-options.tsx",
-  "src/frontend/src/components/core/folderSidebarComponent/components/sideBarFolderButtons/index.tsx",
-  "src/frontend/src/customization/components/custom-get-started-progress.tsx",
-  "src/frontend/src/constants/constants.ts",
-  "src/frontend/src/stores/flowStore.ts",
-  "src/frontend/src/stores/flowsManagerStore.ts",
-  "src/frontend/src/types/flow/index.ts",
-  "src/frontend/src/utils/flowAccess.ts"
-)
-
-$authSecurityCardFallback = @'
-import type { ConfigResponse } from "@/controllers/API/queries/config/use-get-config";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-
-type AuthSecuritySettingsCardProps = {
-  config: ConfigResponse;
-};
-
-export default function AuthSecuritySettingsCard({
-  config,
-}: AuthSecuritySettingsCardProps): JSX.Element {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Authentication Security</CardTitle>
-        <CardDescription>
-          Current authentication and account policy values loaded from server
-          settings.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
-          <div className="rounded-md border p-3">
-            <p className="text-muted-foreground">Public Sign Up</p>
-            <p className="font-medium">
-              {config.enable_public_signup ? "Enabled" : "Disabled"}
-            </p>
-          </div>
-          <div className="rounded-md border p-3">
-            <p className="text-muted-foreground">Password Minimum Length</p>
-            <p className="font-medium">{config.password_min_length}</p>
-          </div>
-          <div className="rounded-md border p-3">
-            <p className="text-muted-foreground">
-              Password Character Classes
-            </p>
-            <p className="font-medium">{config.password_min_character_classes}</p>
-          </div>
-          <div className="rounded-md border p-3">
-            <p className="text-muted-foreground">Login Max Attempts</p>
-            <p className="font-medium">{config.login_max_attempts}</p>
-          </div>
-          <div className="rounded-md border p-3">
-            <p className="text-muted-foreground">Login Attempt Window</p>
-            <p className="font-medium">
-              {config.login_attempt_window_seconds} seconds
-            </p>
-          </div>
-          <div className="rounded-md border p-3">
-            <p className="text-muted-foreground">Lockout Duration</p>
-            <p className="font-medium">{config.login_lockout_seconds} seconds</p>
-          </div>
-          <div className="rounded-md border p-3">
-            <p className="text-muted-foreground">SSO Feature Flag</p>
-            <p className="font-medium">
-              {config.sso_enabled ? "Enabled" : "Disabled"}
-            </p>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-'@
-
-$getSSOProvidersFallback = @'
-import type { useQueryFunctionType } from "@/types/api";
-import type { SSOConfigResponseType } from "./use-get-sso-config";
-import { api } from "../../api";
-import { getURL } from "../../helpers/constants";
-import { UseRequestProcessor } from "../../services/request-processor";
-
-export const useGetSSOProviders: useQueryFunctionType<
-  undefined,
-  SSOConfigResponseType[]
-> = (options) => {
-  const { query } = UseRequestProcessor();
-
-  const getSSOProvidersFn = async () => {
-    const response = await api.get<SSOConfigResponseType[]>(
-      `${getURL("SSO")}/providers`,
-    );
-    return response.data;
-  };
-
-  return query(["useGetSSOProviders"], getSSOProvidersFn, {
-    refetchOnWindowFocus: false,
-    ...options,
-  });
-};
-'@
-
-Info "Restoring feature files from patcher_payload into $TargetRoot"
-$restored = 0
-foreach ($rel in $files) {
-  $src = Join-Path $PayloadRoot $rel
-  $dst = Join-Path $TargetRoot $rel
-  $dstDir = Split-Path -Parent $dst
-
-  if (-not (Test-Path $dstDir)) {
-    New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
-  }
-
-  if (-not (Test-Path $src)) {
-    if ($rel -eq "src/frontend/src/pages/SettingsPage/pages/GeneralPage/components/AuthSecuritySettingsCard/index.tsx") {
-      if (-not (Test-Path $dst)) {
-        Warn "Payload missing AuthSecuritySettingsCard. Creating fallback component at $rel"
-        Set-Content -Path $dst -Value $authSecurityCardFallback -NoNewline
-      } else {
-        Warn "Payload missing AuthSecuritySettingsCard. Keeping existing file at $rel"
-      }
-      $restored++
-      continue
-    }
-
-    if ($rel -eq "src/frontend/src/controllers/API/queries/auth/use-get-sso-providers.ts") {
-      if (-not (Test-Path $dst)) {
-        Warn "Payload missing use-get-sso-providers. Creating fallback hook at $rel"
-        Set-Content -Path $dst -Value $getSSOProvidersFallback -NoNewline
-      } else {
-        Warn "Payload missing use-get-sso-providers. Keeping existing file at $rel"
-      }
-      $restored++
-      continue
-    }
-
-    Fail "Missing payload file: $src"
-  }
-
-  Copy-Item -Path $src -Destination $dst -Force
-  $restored++
-}
-Ok "Restored $restored files"
-
-Info "Ensuring LANGFLOW_AUTO_LOGIN=false in langflow/.env"
-$envFile = Join-Path $TargetRoot ".env"
-$autoLoginLine = "LANGFLOW_AUTO_LOGIN=false"
-if (Test-Path $envFile) {
-  $envContent = Get-Content -Path $envFile -Raw
-  if ($envContent -match "(?m)^\s*LANGFLOW_AUTO_LOGIN\s*=") {
-    $updated = [regex]::Replace(
-      $envContent,
-      "(?m)^\s*LANGFLOW_AUTO_LOGIN\s*=.*$",
-      $autoLoginLine
-    )
-    Set-Content -Path $envFile -Value $updated -NoNewline
-  } else {
-    $trimmed = $envContent.TrimEnd("`r", "`n")
-    if ($trimmed.Length -gt 0) {
-      $trimmed = $trimmed + "`r`n"
-    }
-    Set-Content -Path $envFile -Value ($trimmed + $autoLoginLine + "`r`n") -NoNewline
-  }
-} else {
-  Set-Content -Path $envFile -Value ($autoLoginLine + "`r`n") -NoNewline
-}
-Ok "Configured langflow/.env with LANGFLOW_AUTO_LOGIN=false"
-
-$authIndexPath = Join-Path $TargetRoot "src/frontend/src/controllers/API/queries/auth/index.ts"
-if (Test-Path $authIndexPath) {
-  $authIndex = Get-Content -Path $authIndexPath -Raw
-  $matches = [regex]::Matches($authIndex, 'export \* from "\./([^"]+)";')
-  $missing = @()
-  foreach ($m in $matches) {
-    $name = $m.Groups[1].Value
-    $candidate = Join-Path $TargetRoot ("src/frontend/src/controllers/API/queries/auth/{0}.ts" -f $name)
-    if (-not (Test-Path $candidate)) {
-      $missing += $candidate
-    }
-  }
-
-  if ($missing.Count -gt 0) {
-    $list = ($missing | ForEach-Object { " - $_" }) -join "`n"
-    Fail "Missing auth query files referenced by auth/index.ts:`n$list"
-  }
-}
-
-$ShouldSyncDependencies = -not $HasSyncedCheckout
-if ($ShouldSyncDependencies) {
-  Info "Syncing Python dependencies for the patched Langflow checkout into the active environment"
-  Push-Location $TargetRoot
-  try {
-    uv sync --active --no-dev
-    if ($LASTEXITCODE -ne 0) {
-      Fail "uv sync --active --no-dev failed"
-    }
-  } finally {
-    Pop-Location
-  }
-} else {
-  Info "Patched Langflow checkout is already synced for this environment. Skipping uv sync."
-}
-
-$FrontendRoot = Join-Path $TargetRoot "src/frontend"
-$ShouldInstallFrontendDependencies = $Force -or $ShouldSyncDependencies -or -not (Test-Path (Join-Path $FrontendRoot "node_modules"))
-Push-Location $FrontendRoot
-try {
-  if ($ShouldInstallFrontendDependencies) {
-    Info "Installing frontend dependencies"
-    & $NpmCommand install
-    if ($LASTEXITCODE -ne 0) {
-      Fail "npm install failed"
-    }
-  } else {
-    Info "Frontend dependencies already exist. Skipping npm install."
-  }
-
-  Info "Building frontend"
-  $buildResult = Invoke-NpmBuild -npmCommand $NpmCommand
-  if ($buildResult.ExitCode -ne 0) {
-    $shouldRetrySwcBuild = (
-      (Test-IsWindows) -and
-      (Test-SwcNativeBindingFailure -output $buildResult.Output)
-    )
-
-    if ($shouldRetrySwcBuild) {
-      Warn "Detected an SWC native binding issue. Clearing node_modules and retrying the frontend install once."
-      Remove-Item -Recurse -Force (Join-Path $FrontendRoot "node_modules")
-
-      Info "Reinstalling frontend dependencies"
-      & $NpmCommand install
-      if ($LASTEXITCODE -ne 0) {
-        Fail "npm install failed after SWC retry"
-      }
-
-      Info "Retrying frontend build"
-      $buildResult = Invoke-NpmBuild -npmCommand $NpmCommand
-    }
-
-    if ($buildResult.ExitCode -ne 0) {
-      Fail "npm run build failed"
-    }
-  }
-} finally {
-  Pop-Location
-}
-
-Info "Syncing build output to backend static frontend"
-$frontendDest = Join-Path $TargetRoot "src/backend/base/langflow/frontend"
-Assert-PathWithinRoot -path $frontendDest -root $TargetRoot
-
-if (-not (Test-Path $frontendDest)) {
-  New-Item -ItemType Directory -Path $frontendDest -Force | Out-Null
-}
-
-Get-ChildItem -Path $frontendDest -Force | Remove-Item -Recurse -Force
-Copy-Item -Path (Join-Path $TargetRoot "src/frontend/build/*") -Destination $frontendDest -Recurse -Force
-
-Ok "Install + patch completed."
 Write-InstallState `
   -path $StateFile `
   -pythonVersion $PythonVersion `
   -langflowVersion $InstalledLangflowVersion `
-  -sourceRef $SourceRef `
+  -langflowRoot $LangflowRoot `
+  -lfxRoot $LfxRoot `
   -payloadFingerprint $PayloadFingerprint `
   -installerFingerprint $InstallerFingerprint
+
+Ok "Patch completed."
 Write-Host "Run: .\launcher.ps1" -ForegroundColor White

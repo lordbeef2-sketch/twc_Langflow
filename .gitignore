@@ -3,6 +3,7 @@
 /test-run/
 *.log
 *.zip
+!patcher_payload/frontend_build.zip
 *.pyc
 __pycache__/
 node_modules/
@@ -11,3 +12,4 @@ dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+/_wheelcheck/
