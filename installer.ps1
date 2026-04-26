@@ -144,32 +144,6 @@ function Assert-SupportedPython() {
     Fail "Unable to determine the Python version in the local environment"
   }
 
-  $parts = $pythonVersion.Split(".")
-  if ($parts.Count -lt 2) {
-    Fail "Unexpected Python version format: $pythonVersion"
-  }
-
-  $major = [int]$parts[0]
-  $minor = [int]$parts[1]
-  $minMinor = 10
-  $maxMinor = 13
-  $requiredMinor = $null
-  $supportedRange = "3.10 through 3.13"
-
-  if (Test-IsWindows) {
-    $requiredMinor = 11
-    $supportedRange = "3.11 on Windows"
-  }
-
-  if (
-    $major -ne 3 -or
-    $minor -lt $minMinor -or
-    $minor -gt $maxMinor -or
-    ($null -ne $requiredMinor -and $minor -ne $requiredMinor)
-  ) {
-    Fail "Langflow requires Python $supportedRange. Detected Python $pythonVersion."
-  }
-
   Ok "Using Python $pythonVersion in the local environment"
   return $pythonVersion
 }
