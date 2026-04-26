@@ -116,6 +116,23 @@ function Assert-PathWithinRoot([string]$path, [string]$root) {
   }
 }
 
+function Get-RelativePath([string]$root, [string]$path) {
+  $resolvedRoot = [System.IO.Path]::GetFullPath($root)
+  $resolvedPath = [System.IO.Path]::GetFullPath($path)
+
+  if (
+    -not $resolvedRoot.EndsWith([System.IO.Path]::DirectorySeparatorChar) -and
+    -not $resolvedRoot.EndsWith([System.IO.Path]::AltDirectorySeparatorChar)
+  ) {
+    $resolvedRoot = $resolvedRoot + [System.IO.Path]::DirectorySeparatorChar
+  }
+
+  $rootUri = [System.Uri]::new($resolvedRoot)
+  $pathUri = [System.Uri]::new($resolvedPath)
+  $relativeUri = $rootUri.MakeRelativeUri($pathUri)
+  return [System.Uri]::UnescapeDataString($relativeUri.ToString()).Replace("/", [System.IO.Path]::DirectorySeparatorChar)
+}
+
 function Get-FileSha256([string]$path) {
   return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
@@ -127,7 +144,7 @@ function Get-DirectoryFingerprint([string]$root) {
 
   $entries = New-Object System.Collections.Generic.List[string]
   foreach ($file in Get-ChildItem -Path $root -Recurse -File | Sort-Object FullName) {
-    $relativePath = [System.IO.Path]::GetRelativePath($root, $file.FullName).Replace("\", "/")
+    $relativePath = (Get-RelativePath -root $root -path $file.FullName).Replace("\", "/")
     $fileHash = Get-FileSha256 $file.FullName
     $entries.Add("$relativePath|$fileHash")
   }
@@ -181,6 +198,42 @@ function Write-InstallState(
   $state | ConvertTo-Json | Set-Content -Path $path -NoNewline
 }
 
+function Invoke-NpmBuild([string]$npmCommand) {
+  $previousErrorActionPreference = $ErrorActionPreference
+  $buildOutput = @()
+  $exitCode = 0
+
+  try {
+    $ErrorActionPreference = "Continue"
+    $buildOutput = & $npmCommand run build 2>&1
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+
+  foreach ($line in @($buildOutput)) {
+    Write-Host ([string]$line)
+  }
+
+  return [pscustomobject]@{
+    ExitCode = $exitCode
+    Output = @($buildOutput)
+  }
+}
+
+function Test-SwcNativeBindingFailure([object[]]$output) {
+  if ($null -eq $output -or $output.Count -eq 0) {
+    return $false
+  }
+
+  $text = [string]::Join("`n", @($output))
+  return (
+    $text -match "Failed to load native binding" -or
+    $text -match "@swc/core" -or
+    $text -match "not a valid Win32 application"
+  )
+}
+
 function Get-InstallerPythonSpec() {
   if (-not [string]::IsNullOrWhiteSpace($env:LANGPATCHER_PYTHON)) {
     return $env:LANGPATCHER_PYTHON
@@ -209,8 +262,12 @@ function Use-LocalVenv([string]$venvPath, [string]$pythonSpec) {
 }
 
 function Assert-SupportedPython() {
-  $pythonVersion = (& python -c "import sys; print('.'.join(map(str, sys.version_info[:3])))").Trim()
-  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($pythonVersion)) {
+  $pythonVersionOutput = & python -c "import sys; print('.'.join(map(str, sys.version_info[:3])))"
+  if ($LASTEXITCODE -ne 0 -or $null -eq $pythonVersionOutput) {
+    Fail "Unable to determine the Python version in the local environment"
+  }
+  $pythonVersion = ([string]::Join("`n", @($pythonVersionOutput))).Trim()
+  if ([string]::IsNullOrWhiteSpace($pythonVersion)) {
     Fail "Unable to determine the Python version in the local environment"
   }
 
@@ -245,8 +302,13 @@ function Assert-SupportedPython() {
 }
 
 function Try-Get-InstalledLangflowVersion() {
-  $version = (& python -c "import importlib.metadata as metadata; print(metadata.version('langflow'))" 2>$null).Trim()
-  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($version)) {
+  $versionOutput = & python -c "import importlib.util; import importlib.metadata as metadata; print(metadata.version('langflow') if importlib.util.find_spec('langflow') else '')"
+  if ($LASTEXITCODE -ne 0 -or $null -eq $versionOutput) {
+    return $null
+  }
+
+  $version = ([string]::Join("`n", @($versionOutput))).Trim()
+  if ([string]::IsNullOrWhiteSpace($version)) {
     return $null
   }
 
@@ -307,7 +369,12 @@ function Initialize-LangflowCheckout([string]$targetRoot, [string]$gitRef) {
 
   Push-Location $targetRoot
   try {
-    $currentBranch = (& git branch --show-current).Trim()
+    $currentBranchOutput = & git branch --show-current
+    $currentBranch = if ($null -eq $currentBranchOutput) {
+      ""
+    } else {
+      ([string]::Join("`n", @($currentBranchOutput))).Trim()
+    }
     if (-not [string]::IsNullOrWhiteSpace($currentBranch) -and $currentBranch -ne $gitRef) {
       Warn "Current checkout is on '$currentBranch' instead of '$gitRef'. Continuing without switching branches."
     }
@@ -688,9 +755,30 @@ try {
   }
 
   Info "Building frontend"
-  & $NpmCommand run build
-  if ($LASTEXITCODE -ne 0) {
-    Fail "npm run build failed"
+  $buildResult = Invoke-NpmBuild -npmCommand $NpmCommand
+  if ($buildResult.ExitCode -ne 0) {
+    $shouldRetrySwcBuild = (
+      (Test-IsWindows) -and
+      (Test-SwcNativeBindingFailure -output $buildResult.Output)
+    )
+
+    if ($shouldRetrySwcBuild) {
+      Warn "Detected an SWC native binding issue. Clearing node_modules and retrying the frontend install once."
+      Remove-Item -Recurse -Force (Join-Path $FrontendRoot "node_modules")
+
+      Info "Reinstalling frontend dependencies"
+      & $NpmCommand install
+      if ($LASTEXITCODE -ne 0) {
+        Fail "npm install failed after SWC retry"
+      }
+
+      Info "Retrying frontend build"
+      $buildResult = Invoke-NpmBuild -npmCommand $NpmCommand
+    }
+
+    if ($buildResult.ExitCode -ne 0) {
+      Fail "npm run build failed"
+    }
   }
 } finally {
   Pop-Location
