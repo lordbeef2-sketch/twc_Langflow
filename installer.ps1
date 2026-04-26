@@ -1,5 +1,9 @@
 #!/usr/bin/env pwsh
 
+param(
+  [switch]$Force
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -112,6 +116,71 @@ function Assert-PathWithinRoot([string]$path, [string]$root) {
   }
 }
 
+function Get-FileSha256([string]$path) {
+  return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-DirectoryFingerprint([string]$root) {
+  if (-not (Test-Path $root)) {
+    return ""
+  }
+
+  $entries = New-Object System.Collections.Generic.List[string]
+  foreach ($file in Get-ChildItem -Path $root -Recurse -File | Sort-Object FullName) {
+    $relativePath = [System.IO.Path]::GetRelativePath($root, $file.FullName).Replace("\", "/")
+    $fileHash = Get-FileSha256 $file.FullName
+    $entries.Add("$relativePath|$fileHash")
+  }
+
+  $combined = [string]::Join("`n", $entries)
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($combined)
+  $stream = [System.IO.MemoryStream]::new($bytes)
+  try {
+    return (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash.ToLowerInvariant()
+  } finally {
+    $stream.Dispose()
+  }
+}
+
+function Read-InstallState([string]$path) {
+  if (-not (Test-Path $path)) {
+    return $null
+  }
+
+  try {
+    return Get-Content -Path $path -Raw | ConvertFrom-Json
+  } catch {
+    Warn "Install state file is invalid at $path. Rebuilding generated assets."
+    return $null
+  }
+}
+
+function Write-InstallState(
+  [string]$path,
+  [string]$pythonVersion,
+  [string]$langflowVersion,
+  [string]$sourceRef,
+  [string]$payloadFingerprint,
+  [string]$installerFingerprint
+) {
+  $stateDir = Split-Path -Parent $path
+  if (-not (Test-Path $stateDir)) {
+    New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+  }
+
+  $state = [ordered]@{
+    stateVersion = 1
+    pythonVersion = $pythonVersion
+    langflowVersion = $langflowVersion
+    sourceRef = $sourceRef
+    payloadFingerprint = $payloadFingerprint
+    installerFingerprint = $installerFingerprint
+    updatedAt = (Get-Date).ToString("o")
+  }
+
+  $state | ConvertTo-Json | Set-Content -Path $path -NoNewline
+}
+
 function Get-InstallerPythonSpec() {
   if (-not [string]::IsNullOrWhiteSpace($env:LANGPATCHER_PYTHON)) {
     return $env:LANGPATCHER_PYTHON
@@ -172,11 +241,21 @@ function Assert-SupportedPython() {
   }
 
   Ok "Using Python $pythonVersion in the local environment"
+  return $pythonVersion
+}
+
+function Try-Get-InstalledLangflowVersion() {
+  $version = (& python -c "import importlib.metadata as metadata; print(metadata.version('langflow'))" 2>$null).Trim()
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($version)) {
+    return $null
+  }
+
+  return $version
 }
 
 function Get-InstalledLangflowVersion() {
-  $version = (& python -c "import importlib.metadata as metadata; print(metadata.version('langflow'))").Trim()
-  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($version)) {
+  $version = Try-Get-InstalledLangflowVersion
+  if ([string]::IsNullOrWhiteSpace($version)) {
     Fail "Unable to determine the installed Langflow version"
   }
   return $version
@@ -243,6 +322,7 @@ Set-Location $PackageRoot
 $PayloadRoot = Join-Path $PackageRoot "patcher_payload"
 $VenvPath = Join-Path $PackageRoot ".venv"
 $TargetRoot = Join-Path $PackageRoot "langflow"
+$StateFile = Join-Path $VenvPath "langpatcher-state.json"
 
 if (-not (Test-Path $PayloadRoot)) {
   Fail "Missing payload directory: $PayloadRoot"
@@ -258,19 +338,63 @@ Initialize-WindowsServerRuntime -packageRoot $PackageRoot
 $PythonSpec = Get-InstallerPythonSpec
 
 Use-LocalVenv -venvPath $VenvPath -pythonSpec $PythonSpec
-Assert-SupportedPython
+$PythonVersion = Assert-SupportedPython
+$PayloadFingerprint = Get-DirectoryFingerprint $PayloadRoot
+$InstallerFingerprint = Get-FileSha256 $MyInvocation.MyCommand.Path
+$InstallState = Read-InstallState $StateFile
+$InstalledLangflowVersion = Try-Get-InstalledLangflowVersion
+$HasGitCheckout = (Test-Path $TargetRoot) -and (Test-Path (Join-Path $TargetRoot ".git"))
 
-Info "Installing Langflow into the local environment"
-uv pip install langflow -U
-if ($LASTEXITCODE -ne 0) {
-  Fail "uv pip install langflow -U failed. This installer expects Python 3.11 on Windows; delete .venv and rerun if the environment was created with a different Python version."
+if ($Force) {
+  Warn "Force mode enabled. LangPatcher will rebuild generated assets and resync dependencies."
 }
 
-$InstalledLangflowVersion = Get-InstalledLangflowVersion
-Ok "Installed Langflow $InstalledLangflowVersion into the local environment"
+$HasMatchingPatchedInstall = (
+  -not $Force -and
+  $null -ne $InstallState -and
+  -not [string]::IsNullOrWhiteSpace($InstalledLangflowVersion) -and
+  $InstallState.pythonVersion -eq $PythonVersion -and
+  $InstallState.langflowVersion -eq $InstalledLangflowVersion -and
+  $InstallState.payloadFingerprint -eq $PayloadFingerprint -and
+  $InstallState.installerFingerprint -eq $InstallerFingerprint -and
+  $HasGitCheckout
+)
 
-$SourceRef = Resolve-LangflowGitRef $InstalledLangflowVersion
-Initialize-LangflowCheckout -targetRoot $TargetRoot -gitRef $SourceRef
+if ($HasMatchingPatchedInstall) {
+  Ok "LangPatcher is already applied for Langflow $InstalledLangflowVersion. Skipping reinstall and rebuild."
+  Write-Host "Run: .\launcher.ps1" -ForegroundColor White
+  exit 0
+}
+
+if ([string]::IsNullOrWhiteSpace($InstalledLangflowVersion)) {
+  Info "Installing Langflow into the local environment"
+  uv pip install langflow -U
+  if ($LASTEXITCODE -ne 0) {
+    Fail "uv pip install langflow -U failed. This installer expects Python 3.11 on Windows; delete .venv and rerun if the environment was created with a different Python version."
+  }
+
+  $InstalledLangflowVersion = Get-InstalledLangflowVersion
+  Ok "Installed Langflow $InstalledLangflowVersion into the local environment"
+} else {
+  Ok "Reusing Langflow $InstalledLangflowVersion already installed in the local environment"
+}
+
+$HasSyncedCheckout = (
+  -not $Force -and
+  $null -ne $InstallState -and
+  $InstallState.pythonVersion -eq $PythonVersion -and
+  $InstallState.langflowVersion -eq $InstalledLangflowVersion -and
+  $HasGitCheckout -and
+  -not [string]::IsNullOrWhiteSpace([string]$InstallState.sourceRef)
+)
+
+if ($HasSyncedCheckout) {
+  $SourceRef = [string]$InstallState.sourceRef
+  Info "Reusing existing Langflow checkout for ref '$SourceRef'"
+} else {
+  $SourceRef = Resolve-LangflowGitRef $InstalledLangflowVersion
+  Initialize-LangflowCheckout -targetRoot $TargetRoot -gitRef $SourceRef
+}
 
 $files = @(
   "src/backend/base/langflow/alembic/versions/f4a1c2d3e4b5_add_flow_share_table.py",
@@ -533,23 +657,34 @@ if (Test-Path $authIndexPath) {
   }
 }
 
-Info "Syncing Python dependencies for the patched Langflow checkout into the active environment"
-Push-Location $TargetRoot
-try {
-  uv sync --active --no-dev
-  if ($LASTEXITCODE -ne 0) {
-    Fail "uv sync --active --no-dev failed"
+$ShouldSyncDependencies = -not $HasSyncedCheckout
+if ($ShouldSyncDependencies) {
+  Info "Syncing Python dependencies for the patched Langflow checkout into the active environment"
+  Push-Location $TargetRoot
+  try {
+    uv sync --active --no-dev
+    if ($LASTEXITCODE -ne 0) {
+      Fail "uv sync --active --no-dev failed"
+    }
+  } finally {
+    Pop-Location
   }
-} finally {
-  Pop-Location
+} else {
+  Info "Patched Langflow checkout is already synced for this environment. Skipping uv sync."
 }
 
-Info "Installing frontend dependencies"
-Push-Location (Join-Path $TargetRoot "src/frontend")
+$FrontendRoot = Join-Path $TargetRoot "src/frontend"
+$ShouldInstallFrontendDependencies = $Force -or $ShouldSyncDependencies -or -not (Test-Path (Join-Path $FrontendRoot "node_modules"))
+Push-Location $FrontendRoot
 try {
-  & $NpmCommand install
-  if ($LASTEXITCODE -ne 0) {
-    Fail "npm install failed"
+  if ($ShouldInstallFrontendDependencies) {
+    Info "Installing frontend dependencies"
+    & $NpmCommand install
+    if ($LASTEXITCODE -ne 0) {
+      Fail "npm install failed"
+    }
+  } else {
+    Info "Frontend dependencies already exist. Skipping npm install."
   }
 
   Info "Building frontend"
@@ -573,4 +708,11 @@ Get-ChildItem -Path $frontendDest -Force | Remove-Item -Recurse -Force
 Copy-Item -Path (Join-Path $TargetRoot "src/frontend/build/*") -Destination $frontendDest -Recurse -Force
 
 Ok "Install + patch completed."
+Write-InstallState `
+  -path $StateFile `
+  -pythonVersion $PythonVersion `
+  -langflowVersion $InstalledLangflowVersion `
+  -sourceRef $SourceRef `
+  -payloadFingerprint $PayloadFingerprint `
+  -installerFingerprint $InstallerFingerprint
 Write-Host "Run: .\launcher.ps1" -ForegroundColor White
