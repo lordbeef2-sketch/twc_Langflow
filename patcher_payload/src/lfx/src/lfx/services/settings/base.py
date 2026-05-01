@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 from pathlib import Path
 from shutil import copy2
 from typing import Any, Literal
@@ -307,6 +308,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices(
             "TWC_AUTH_CLIENT_ID",
             "LANGFLOW_TWC_AUTH_CLIENT_ID",
+            "TWC_AUTHENTICATION_CLIENT_ID",
+            "LANGFLOW_TWC_AUTHENTICATION_CLIENT_ID",
+            "TWC_AUTHENTICATION_CLIENT_IDS",
+            "LANGFLOW_TWC_AUTHENTICATION_CLIENT_IDS",
             "authentication.client.ids",
         ),
     )
@@ -316,12 +321,14 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices(
             "TWC_AUTH_CLIENT_SECRET",
             "LANGFLOW_TWC_AUTH_CLIENT_SECRET",
+            "TWC_AUTHENTICATION_CLIENT_SECRET",
+            "LANGFLOW_TWC_AUTHENTICATION_CLIENT_SECRET",
             "authentication.client.secret",
         ),
     )
     """Shared Authentication Server secret sent in X-Auth-Secret."""
     twc_auth_callback_path: str = Field(
-        default="/api/v1/auth/twc/callback",
+        default="/api/auth/callback",
         validation_alias=AliasChoices("TWC_AUTH_CALLBACK_PATH", "LANGFLOW_TWC_AUTH_CALLBACK_PATH"),
     )
     """Callback path used for the TWC authorization-code flow."""
@@ -502,7 +509,7 @@ class Settings(BaseSettings):
 
     @field_validator("twc_auth_callback_path", "twc_saml_login_path", "twc_saml_token_path", mode="before")
     @classmethod
-    def normalize_twc_paths(cls, value):
+    def normalize_twc_paths(cls, value, info):
         if value is None:
             return value
         if isinstance(value, Path):
@@ -510,6 +517,12 @@ class Settings(BaseSettings):
         value = str(value).strip()
         if not value:
             return value
+        if info.field_name == "twc_saml_login_path" and value.lower() in {
+            "/osmc/authen/login",
+            "/osmc/login.html",
+            "/authentication/saml2/sso/tssd-twc2024x",
+        }:
+            return "/authentication/authorize"
         if not value.startswith("/"):
             value = f"/{value}"
         return value
@@ -539,8 +552,8 @@ class Settings(BaseSettings):
             value = next((str(item).strip() for item in value if str(item).strip()), None)
             return value
         value = str(value).strip()
-        if "," in value:
-            value = next((part.strip() for part in value.split(",") if part.strip()), "")
+        if "," in value or ";" in value:
+            value = next((part.strip() for part in re.split(r"[;,]", value) if part.strip()), "")
         return value or None
 
     @field_validator("use_noop_database", mode="before")

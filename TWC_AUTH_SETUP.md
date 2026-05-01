@@ -8,10 +8,10 @@ Set these values in the environment for the Langflow process:
 
 ```env
 APP_ORIGIN=https://langflow.example.com
-TWC_PRESET_SERVERS=[{"id":"prod","label":"Production TWC","rest_url":"https://twc.example.com:8111"}]
+TWC_PRESET_SERVERS=[{"id":"prod","name":"Production TWC","base_url":"https://twc.example.com:8111","verify_tls":true,"enabled":true,"display_order":1}]
 TWC_AUTH_CLIENT_ID=langflow-client
 TWC_AUTH_CLIENT_SECRET=replace-with-authentication-client-secret
-TWC_AUTH_CALLBACK_PATH=/api/v1/auth/twc/callback
+TWC_AUTH_CALLBACK_PATH=/api/auth/callback
 TWC_AUTH_SCOPE=openid
 TWC_SAML_LOGIN_PATH=/authentication/authorize
 TWC_SAML_LOGIN_PORT=8443
@@ -23,6 +23,9 @@ Supported aliases:
 
 - `authentication.client.ids`
 - `authentication.client.secret`
+- `TWC_AUTHENTICATION_CLIENT_ID`
+- `TWC_AUTHENTICATION_CLIENT_IDS`
+- `TWC_AUTHENTICATION_CLIENT_SECRET`
 
 `TWC_PRESET_SERVERS` accepts:
 
@@ -35,11 +38,23 @@ Each server object may include:
 ```json
 {
   "id": "prod",
-  "label": "Production TWC",
-  "rest_url": "https://twc.example.com:8111",
-  "verify_tls": true
+  "name": "Production TWC",
+  "base_url": "https://twc.example.com:8111",
+  "verify_tls": true,
+  "ca_bundle_path": "C:/certs/internal-ca.pem",
+  "enabled": true,
+  "display_order": 1
 }
 ```
+
+Accepted server keys include:
+
+- `base_url` or `rest_url`
+- `name` or `label`
+- `verify_tls`
+- `ca_bundle_path`
+- `enabled`
+- `display_order`
 
 ## Optional per-server overrides
 
@@ -70,9 +85,14 @@ Supported per-server override keys:
 - `scope`
 - `client_id`
 - `client_secret`
+- `authentication.client.id`
 - `authentication.client.ids`
+- `authentication_client_id`
+- `authentication_client_ids`
 - `authentication.client.secret`
+- `authentication_client_secret`
 - `verify_tls`
+- `ca_bundle_path`
 
 `verify_tls` supports:
 
@@ -91,8 +111,10 @@ TWC operators must make sure:
 For the default callback path, whitelist:
 
 ```text
-https://langflow.example.com/api/v1/auth/twc/callback
+https://langflow.example.com/api/auth/callback
 ```
+
+Backward-compatible callback routes still exist under `/api/v1/auth/twc/callback`, but a New Project-style setup can now use `/api/auth/callback` directly.
 
 ## Flow summary
 
@@ -109,14 +131,20 @@ Example local env:
 
 ```powershell
 $env:APP_ORIGIN='http://127.0.0.1:7860'
-$env:TWC_PRESET_SERVERS='[{"id":"alpha","label":"Alpha TWC","rest_url":"https://alpha.example.com:8111"}]'
+$env:TWC_PRESET_SERVERS='[{"id":"alpha","name":"Alpha TWC","base_url":"https://alpha.example.com:8111","verify_tls":false}]'
 $env:TWC_AUTH_CLIENT_ID='langflow-client'
 $env:TWC_AUTH_CLIENT_SECRET='replace-with-secret'
+$env:TWC_AUTH_CALLBACK_PATH='/api/auth/callback'
 .\launcher.ps1
 ```
 
 Expected routes:
 
+- `GET /api/auth/servers`
+- `GET /api/auth/signin/{server_id}`
+- `GET /api/auth/callback`
+- `POST /api/auth/logout`
+- `GET /api/auth/status`
 - `GET /api/v1/auth/twc/servers`
 - `GET /api/v1/auth/twc/signin/{server_id}`
 - `GET /api/v1/auth/twc/callback`

@@ -23,6 +23,7 @@ from langflow.api.v1 import (
     starter_projects_router,
     store_router,
     traces_router,
+    twc_auth_compat_router,
     twc_auth_router,
     users_router,
     validate_router,
@@ -87,5 +88,6 @@ router_v2.include_router(workflow_router_v2)
 router = APIRouter(
     prefix="/api",
 )
+router.include_router(twc_auth_compat_router)
 router.include_router(router_v1)
 router.include_router(router_v2)

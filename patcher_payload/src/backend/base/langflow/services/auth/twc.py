@@ -27,7 +27,12 @@ TWC_SESSION_ID_COOKIE = "twc_session_id_lf"
 TWC_SESSION_VERSION = 1
 TWC_STATE_TTL_SECONDS = 600
 TWC_SESSION_LEEWAY_SECONDS = 60
-TWC_CALLBACK_DEFAULT_PATH = "/api/v1/auth/twc/callback"
+TWC_CALLBACK_DEFAULT_PATH = "/api/auth/callback"
+LEGACY_TWC_AUTH_PATHS = {
+    "/osmc/authen/login",
+    "/osmc/login.html",
+    "/authentication/saml2/sso/tssd-twc2024x",
+}
 
 
 class TWCServerConfig(BaseModel):
@@ -41,6 +46,7 @@ class TWCServerConfig(BaseModel):
     client_secret: str | None = None
     return_url_parameter: str = "redirect_uri"
     verify_tls: bool | str = True
+    ca_bundle_path: str | None = None
     ready: bool = True
     error: str | None = None
 
@@ -220,6 +226,21 @@ def _normalize_verify_tls(value: Any) -> bool | str:
     return str(Path(value_str).expanduser())
 
 
+def _normalize_ca_bundle_path(value: Any) -> str | None:
+    if value is None:
+        return None
+    value_str = str(value).strip()
+    if not value_str:
+        return None
+    return str(Path(value_str).expanduser())
+
+
+def _resolve_httpx_verify(server: TWCServerConfig) -> bool | str:
+    if server.verify_tls and server.ca_bundle_path:
+        return server.ca_bundle_path
+    return server.verify_tls
+
+
 def _first_non_empty(*values: Any) -> Any:
     for value in values:
         if value is None:
@@ -261,6 +282,19 @@ def _normalize_rest_url(value: str) -> str:
     netloc = f"{host}:{port}"
     path = parsed.path.rstrip("/")
     return urlunparse((scheme, netloc, path, "", "", "")).rstrip("/")
+
+
+def _normalize_auth_path(value: Any, *, default: str) -> str:
+    if value is None:
+        value = default
+    raw = str(value).strip()
+    if not raw:
+        raw = default
+    if default == "/authentication/authorize" and raw.lower() in LEGACY_TWC_AUTH_PATHS:
+        raw = "/authentication/authorize"
+    if not raw.startswith("/"):
+        raw = f"/{raw}"
+    return raw
 
 
 def _derive_auth_url(rest_url: str, *, port: int, path: str) -> str:
@@ -337,12 +371,25 @@ def load_twc_server_configs() -> list[TWCServerConfig]:
     if global_client_secret is not None and hasattr(global_client_secret, "get_secret_value"):
         global_client_secret = global_client_secret.get_secret_value()
 
+    ordered_entries = sorted(
+        raw_entries,
+        key=lambda entry: (
+            int(entry.get("display_order", entry.get("displayOrder", 0)) or 0),
+            str(entry.get("id") or entry.get("server_id") or ""),
+        ),
+    )
+
     configs: list[TWCServerConfig] = []
-    for index, entry in enumerate(raw_entries, start=1):
+    for index, entry in enumerate(ordered_entries, start=1):
         try:
+            enabled = entry.get("enabled")
+            if enabled is False:
+                continue
             rest_url = _normalize_rest_url(
                 str(
                     _first_non_empty(
+                        entry.get("base_url"),
+                        entry.get("baseUrl"),
                         entry.get("rest_url"),
                         entry.get("url"),
                         entry.get("server"),
@@ -361,19 +408,21 @@ def load_twc_server_configs() -> list[TWCServerConfig]:
                     getattr(settings, "twc_saml_login_port", 8443),
                 )
             )
-            login_path = str(
+            login_path = _normalize_auth_path(
                 _first_non_empty(
                     entry.get("login_path"),
                     override.get("login_path"),
                     getattr(settings, "twc_saml_login_path", "/authentication/authorize"),
-                )
+                ),
+                default="/authentication/authorize",
             )
-            token_path = str(
+            token_path = _normalize_auth_path(
                 _first_non_empty(
                     entry.get("token_path"),
                     override.get("token_path"),
                     getattr(settings, "twc_saml_token_path", "/authentication/api/token"),
-                )
+                ),
+                default="/authentication/api/token",
             )
             authorize_url = str(
                 _first_non_empty(
@@ -400,16 +449,24 @@ def load_twc_server_configs() -> list[TWCServerConfig]:
             )
             client_id = _first_non_empty(
                 entry.get("client_id"),
+                entry.get("authentication.client.id"),
                 entry.get("authentication.client.ids"),
+                entry.get("authentication_client_id"),
+                entry.get("authentication_client_ids"),
                 override.get("client_id"),
+                override.get("authentication.client.id"),
                 override.get("authentication.client.ids"),
+                override.get("authentication_client_id"),
+                override.get("authentication_client_ids"),
                 global_client_id,
             )
             client_secret = _first_non_empty(
                 entry.get("client_secret"),
                 entry.get("authentication.client.secret"),
+                entry.get("authentication_client_secret"),
                 override.get("client_secret"),
                 override.get("authentication.client.secret"),
+                override.get("authentication_client_secret"),
                 global_client_secret,
             )
             return_url_parameter = str(
@@ -421,6 +478,14 @@ def load_twc_server_configs() -> list[TWCServerConfig]:
                 )
             )
             verify_tls = _normalize_verify_tls(_first_non_empty(entry.get("verify_tls"), override.get("verify_tls")))
+            ca_bundle_path = _normalize_ca_bundle_path(
+                _first_non_empty(
+                    entry.get("ca_bundle_path"),
+                    entry.get("caBundlePath"),
+                    override.get("ca_bundle_path"),
+                    override.get("caBundlePath"),
+                )
+            )
 
             error = None
             if not client_id:
@@ -440,6 +505,7 @@ def load_twc_server_configs() -> list[TWCServerConfig]:
                     client_secret=str(client_secret) if client_secret else None,
                     return_url_parameter=return_url_parameter or "redirect_uri",
                     verify_tls=verify_tls,
+                    ca_bundle_path=ca_bundle_path,
                     ready=error is None,
                     error=error,
                 )
@@ -539,11 +605,11 @@ async def _request_form_encoded(
 async def exchange_code_for_tokens(server: TWCServerConfig, *, callback_url: str, code: str) -> dict[str, Any]:
     return await _request_form_encoded(
         url=server.token_url,
-        verify_tls=server.verify_tls,
+        verify_tls=_resolve_httpx_verify(server),
         client_secret=server.client_secret or "",
         data={
             "scope": server.scope,
-            server.return_url_parameter: callback_url,
+            "redirect_uri": callback_url,
             "client_id": server.client_id,
             "grant_type": "authorization_code",
             "code": code,
@@ -554,11 +620,11 @@ async def exchange_code_for_tokens(server: TWCServerConfig, *, callback_url: str
 async def refresh_tokens(server: TWCServerConfig, *, callback_url: str, refresh_token: str) -> dict[str, Any]:
     return await _request_form_encoded(
         url=server.token_url,
-        verify_tls=server.verify_tls,
+        verify_tls=_resolve_httpx_verify(server),
         client_secret=server.client_secret or "",
         data={
             "scope": server.scope,
-            server.return_url_parameter: callback_url,
+            "redirect_uri": callback_url,
             "client_id": server.client_id,
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
@@ -607,7 +673,7 @@ def _token_expiry(token_data: dict[str, Any], id_claims: dict[str, Any], access_
 
 async def validate_current_user(server: TWCServerConfig, token: str) -> dict[str, Any]:
     try:
-        async with httpx.AsyncClient(timeout=20.0, verify=server.verify_tls, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=20.0, verify=_resolve_httpx_verify(server), follow_redirects=True) as client:
             response = await client.get(
                 f"{server.rest_url}/osmc/admin/currentUser",
                 params={"permission": "true"},

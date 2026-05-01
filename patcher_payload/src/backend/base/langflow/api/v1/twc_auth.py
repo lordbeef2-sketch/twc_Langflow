@@ -41,6 +41,7 @@ from langflow.services.auth.twc import (
 from langflow.services.deps import get_auth_service
 
 router = APIRouter(tags=["TWC Authentication"], prefix="/auth/twc")
+compat_router = APIRouter(tags=["TWC Authentication"], prefix="/auth")
 
 
 class TWCServerResponse(BaseModel):
@@ -97,6 +98,7 @@ def _serialize_server(server: TWCServerConfig) -> TWCServerResponse:
 
 
 @router.get("/servers", response_model=TWCServersResponse)
+@compat_router.get("/servers", response_model=TWCServersResponse)
 async def list_twc_servers():
     servers = load_twc_server_configs()
     ready_servers = [server for server in servers if server.ready]
@@ -110,6 +112,7 @@ async def list_twc_servers():
 
 
 @router.get("/signin/{server_id}")
+@compat_router.get("/signin/{server_id}")
 async def twc_signin(
     request: Request,
     server_id: str,
@@ -126,6 +129,7 @@ async def twc_signin(
 
 
 @router.get("/callback")
+@compat_router.get("/callback")
 async def twc_callback(
     request: Request,
     session: DbSession,
@@ -203,6 +207,7 @@ async def twc_callback(
 
 
 @router.post("/logout")
+@compat_router.post("/logout")
 async def twc_logout(request: Request, response: Response):
     await delete_twc_session(request.cookies.get(TWC_SESSION_ID_COOKIE))
     clear_twc_session_cookie(response)
@@ -212,6 +217,7 @@ async def twc_logout(request: Request, response: Response):
 
 
 @router.get("/status", response_model=TWCAuthStatusResponse)
+@compat_router.get("/status", response_model=TWCAuthStatusResponse)
 async def twc_status(request: Request):
     servers = load_twc_server_configs()
     ready_servers = [server for server in servers if server.ready]
