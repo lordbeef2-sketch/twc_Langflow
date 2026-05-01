@@ -7,6 +7,8 @@ export * from "./use-get-sso-config";
 export * from "./use-get-sso-settings";
 export * from "./use-get-sso-providers";
 export * from "./use-get-saml-metadata";
+export * from "./use-get-twc-servers";
+export * from "./use-get-twc-status";
 export * from "./use-get-https-settings";
 export * from "./use-patch-reset-password";
 export * from "./use-patch-update-user";

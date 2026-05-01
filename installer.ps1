@@ -63,6 +63,9 @@ function Get-DirectoryFingerprint([string]$root) {
 
   $entries = New-Object System.Collections.Generic.List[string]
   foreach ($file in Get-ChildItem -Path $root -Recurse -File | Sort-Object FullName) {
+    if ($file.Extension -eq ".pyc" -or $file.DirectoryName -match "(^|\\)__pycache__(\\|$)") {
+      continue
+    }
     $relativePath = (Get-RelativePath -root $root -path $file.FullName).Replace("\", "/")
     $fileHash = Get-FileSha256 $file.FullName
     $entries.Add("$relativePath|$fileHash")
@@ -200,6 +203,9 @@ function Copy-Tree([string]$sourceRoot, [string]$destinationRoot) {
 
   $copied = 0
   foreach ($file in Get-ChildItem -Path $sourceRoot -Recurse -File | Sort-Object FullName) {
+    if ($file.Extension -eq ".pyc" -or $file.DirectoryName -match "(^|\\)__pycache__(\\|$)") {
+      continue
+    }
     $relativePath = Get-RelativePath -root $sourceRoot -path $file.FullName
     $destinationPath = Join-Path $destinationRoot $relativePath
     $destinationDir = Split-Path -Parent $destinationPath

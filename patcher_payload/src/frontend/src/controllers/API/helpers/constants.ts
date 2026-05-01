@@ -39,6 +39,7 @@ export const URLs = {
   RUN_SESSION: `run/session`,
   REGISTRATION: `registration`,
   SSO: `sso`,
+  TWC_AUTH: `auth/twc`,
   ADMIN_SETTINGS: `admin/settings`,
 } as const;
 
