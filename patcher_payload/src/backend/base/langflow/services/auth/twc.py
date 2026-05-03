@@ -97,6 +97,43 @@ def _safe_next(next_url: str | None) -> str:
     return next_url
 
 
+def _get_callback_path() -> str:
+    callback_path = getattr(get_settings_service().settings, "twc_auth_callback_path", TWC_CALLBACK_DEFAULT_PATH)
+    callback_path = str(callback_path or TWC_CALLBACK_DEFAULT_PATH).strip() or TWC_CALLBACK_DEFAULT_PATH
+    return callback_path if callback_path.startswith("/") else f"/{callback_path}"
+
+
+def _get_app_prefix_from_callback_url(callback_url: str) -> tuple[str, str, str]:
+    parsed = urlparse(callback_url)
+    callback_path = _get_callback_path()
+    base_path = parsed.path
+    if callback_path and base_path.endswith(callback_path):
+        app_prefix = base_path[: -len(callback_path)]
+    else:
+        app_prefix = ""
+    if app_prefix.endswith("/"):
+        app_prefix = app_prefix.rstrip("/")
+    return parsed.scheme, parsed.netloc, app_prefix
+
+
+def build_post_login_redirect_url(*, request: Request, next_url: str | None) -> str:
+    callback_url = get_twc_callback_url(request)
+    scheme, netloc, app_prefix = _get_app_prefix_from_callback_url(callback_url)
+    normalized_next = _safe_next(next_url)
+
+    if app_prefix:
+        if normalized_next == "/":
+            target_path = f"{app_prefix}/"
+        elif normalized_next == app_prefix or normalized_next.startswith(f"{app_prefix}/"):
+            target_path = normalized_next
+        else:
+            target_path = f"{app_prefix}{normalized_next}"
+    else:
+        target_path = normalized_next
+
+    return f"{scheme}://{netloc}{target_path}"
+
+
 def _cookie_settings() -> Any:
     return get_settings_service().auth_settings
 
@@ -990,19 +1027,7 @@ async def validate_and_refresh_twc_session(session_data: TWCSessionData, *, requ
 def build_login_error_redirect(*, request: Request, message: str) -> str:
     callback_url = get_twc_callback_url(request)
     parsed = urlparse(callback_url)
-    callback_path = getattr(get_settings_service().settings, "twc_auth_callback_path", TWC_CALLBACK_DEFAULT_PATH)
-    callback_path = callback_path if str(callback_path).startswith("/") else f"/{callback_path}"
-    callback_path = str(callback_path)
-
-    base_path = parsed.path
-    if callback_path and base_path.endswith(callback_path):
-        app_prefix = base_path[: -len(callback_path)]
-    else:
-        app_prefix = ""
-
-    if app_prefix.endswith("/"):
-        app_prefix = app_prefix.rstrip("/")
-
+    _, _, app_prefix = _get_app_prefix_from_callback_url(callback_url)
     normalized_login_path = f"{app_prefix}/login" if app_prefix else "/login"
     query = urlencode({"twc_error": message})
     return f"{parsed.scheme}://{parsed.netloc}{normalized_login_path}?{query}"

@@ -32,6 +32,7 @@ from langflow.services.auth.twc import (
     get_twc_session_from_request,
     initialize_langflow_user,
     load_twc_server_configs,
+    build_post_login_redirect_url,
     save_twc_session,
     set_cookie,
     set_twc_session_cookie,
@@ -196,7 +197,10 @@ async def twc_callback(
         )
         await save_twc_session(session_data)
 
-        response = RedirectResponse(url=str(state_payload.get("next") or "/"), status_code=302)
+        response = RedirectResponse(
+            url=build_post_login_redirect_url(request=request, next_url=str(state_payload.get("next") or "/")),
+            status_code=302,
+        )
         create_langflow_login_response(response=response, tokens=langflow_tokens, user=user)
         set_twc_session_cookie(response, session_data.session_id)
         clear_twc_state_cookies(response)
