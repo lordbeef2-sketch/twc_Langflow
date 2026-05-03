@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import asyncio
 import json
 import secrets
@@ -11,6 +12,7 @@ from urllib.parse import urlencode, urlparse, urlunparse
 import httpx
 import jwt
 from fastapi import HTTPException, Request, Response, status
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlmodel import select
@@ -1077,6 +1079,206 @@ def build_login_error_redirect(*, request: Request, message: str) -> str:
     normalized_login_path = f"{app_prefix}/login" if app_prefix else "/login"
     query = urlencode({"twc_error": message})
     return f"{parsed.scheme}://{parsed.netloc}{normalized_login_path}?{query}"
+
+
+def is_twc_auto_login_enabled() -> bool:
+    return bool(getattr(get_settings_service().settings, "twc_auto_login", False))
+
+
+def _has_langflow_auth_cookies(request: Request) -> bool:
+    return any(
+        request.cookies.get(cookie_name)
+        for cookie_name in (
+            "access_token_lf",
+            "refresh_token_lf",
+            "apikey_tkn_lflw",
+        )
+    )
+
+
+def _is_browser_navigation(request: Request) -> bool:
+    accept_header = request.headers.get("accept", "").lower()
+    if "text/html" in accept_header:
+        return True
+    if not accept_header:
+        return True
+    sec_fetch_dest = request.headers.get("sec-fetch-dest", "").lower()
+    if sec_fetch_dest in {"document", "iframe"}:
+        return True
+    return False
+
+
+def _is_twc_auto_login_path_excluded(path: str) -> bool:
+    callback_path = _get_callback_path()
+    if path.startswith("/api/"):
+        return True
+    if path in {"/docs", "/redoc", "/openapi.json", "/health"}:
+        return True
+    if callback_path and path == callback_path:
+        return True
+    filename = path.rsplit("/", 1)[-1]
+    return "." in filename
+
+
+def _get_auto_login_next_url(request: Request) -> str:
+    explicit_next = request.query_params.get("next")
+    if explicit_next:
+        return _safe_next(explicit_next)
+
+    path = request.url.path or "/"
+    if path == "/login":
+        return "/"
+
+    query = request.url.query
+    if query:
+        return f"{path}?{query}"
+    return path
+
+
+def _get_default_ready_twc_server() -> TWCServerConfig | None:
+    for server in load_twc_server_configs():
+        if server.ready:
+            return server
+    return None
+
+
+def _build_twc_retry_path(request: Request, server_id: str) -> str:
+    callback_url = get_twc_callback_url(request)
+    _, _, app_prefix = _get_app_prefix_from_callback_url(callback_url)
+    server_segment = server_id.replace("/", "%2F")
+    if app_prefix:
+        return f"{app_prefix}/api/auth/signin/{server_segment}"
+    return f"/api/auth/signin/{server_segment}"
+
+
+def build_twc_auto_login_error_page(*, request: Request, message: str) -> HTMLResponse:
+    retry_server = _get_default_ready_twc_server()
+    retry_href = _build_twc_retry_path(request, retry_server.id) if retry_server else None
+    escaped_message = html.escape(message)
+    retry_markup = (
+        f'<a class="twc-retry" href="{html.escape(retry_href)}">Try TWC sign-in again</a>' if retry_href else ""
+    )
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Teamwork Cloud sign-in</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --text: #132238;
+      --muted: #5f6f85;
+      --line: #d8e0ea;
+      --accent: #0f6cbd;
+      --danger-bg: #fff3f2;
+      --danger-line: #f3c8c2;
+      --danger-text: #8a1c11;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background:
+        radial-gradient(circle at top, rgba(15, 108, 189, 0.12), transparent 42%),
+        var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }}
+    .panel {{
+      width: min(520px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 28px;
+      box-shadow: 0 24px 60px rgba(19, 34, 56, 0.12);
+    }}
+    h1 {{
+      margin: 0 0 10px;
+      font-size: 1.5rem;
+    }}
+    p {{
+      margin: 0 0 18px;
+      color: var(--muted);
+      line-height: 1.55;
+    }}
+    .error {{
+      border: 1px solid var(--danger-line);
+      background: var(--danger-bg);
+      color: var(--danger-text);
+      border-radius: 14px;
+      padding: 14px 16px;
+      line-height: 1.55;
+    }}
+    .twc-retry {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 18px;
+      min-height: 42px;
+      padding: 0 18px;
+      border-radius: 999px;
+      background: var(--accent);
+      color: #fff;
+      text-decoration: none;
+      font-weight: 600;
+    }}
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <h1>Teamwork Cloud sign-in could not be completed</h1>
+    <p>Local credential sign-in is disabled for this workspace. Resolve the Teamwork Cloud issue below and retry SSO.</p>
+    <div class="error">{escaped_message}</div>
+    {retry_markup}
+  </main>
+</body>
+</html>
+"""
+    response = HTMLResponse(page)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def maybe_build_twc_auto_login_response(request: Request) -> Response | None:
+    if not is_twc_auto_login_enabled():
+        return None
+    if request.method.upper() not in {"GET", "HEAD"}:
+        return None
+    if request.query_params.get("skip_twc_auto_login"):
+        return None
+    if _has_langflow_auth_cookies(request):
+        return None
+    if not _is_browser_navigation(request):
+        return None
+
+    path = request.url.path or "/"
+    if _is_twc_auto_login_path_excluded(path):
+        return None
+
+    if path == "/login" and request.query_params.get("twc_error"):
+        return build_twc_auto_login_error_page(request=request, message=request.query_params.get("twc_error") or "")
+
+    server = _get_default_ready_twc_server()
+    if server is None:
+        return None
+
+    target_url, nonce = build_signin_redirect(
+        server,
+        callback_url=get_twc_callback_url(request),
+        next_url=_get_auto_login_next_url(request),
+    )
+    response = RedirectResponse(url=target_url, status_code=307)
+    set_cookie(response, TWC_STATE_NONCE_COOKIE, nonce, max_age=600)
+    set_cookie(response, TWC_STATE_SERVER_COOKIE, server.id, max_age=600)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def extract_proxy_token_bundle(request: Request) -> dict[str, str] | None:

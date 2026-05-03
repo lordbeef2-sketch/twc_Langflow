@@ -43,6 +43,9 @@ export const useLogout: useMutationFunctionType<undefined, void> = (
       useFolderStore.getState().resetStore();
 
       queryClient.clear();
+      window.location.assign(
+        `${window.location.pathname}${window.location.search}`,
+      );
     },
     onError: (error) => {
       console.error(error);

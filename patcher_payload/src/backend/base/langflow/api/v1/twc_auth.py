@@ -31,6 +31,7 @@ from langflow.services.auth.twc import (
     get_twc_server,
     get_twc_session_from_request,
     initialize_langflow_user,
+    is_twc_auto_login_enabled,
     load_twc_server_configs,
     build_post_login_redirect_url,
     save_twc_session,
@@ -56,6 +57,7 @@ class TWCServerResponse(BaseModel):
 
 class TWCServersResponse(BaseModel):
     enabled: bool
+    auto_login: bool = False
     single_server: bool
     default_server_id: str | None = None
     servers: list[TWCServerResponse]
@@ -106,6 +108,7 @@ async def list_twc_servers():
     default_server_id = ready_servers[0].id if len(ready_servers) == 1 else None
     return TWCServersResponse(
         enabled=bool(servers),
+        auto_login=is_twc_auto_login_enabled(),
         single_server=len(ready_servers) == 1,
         default_server_id=default_server_id,
         servers=[_serialize_server(server) for server in servers],

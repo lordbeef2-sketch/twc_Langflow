@@ -337,6 +337,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TWC_AUTH_SCOPE", "LANGFLOW_TWC_AUTH_SCOPE"),
     )
     """Requested TWC/OIDC scope. Blank values normalize to 'openid'."""
+    twc_auto_login: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("TWC_AUTO_LOGIN", "LANGFLOW_TWC_AUTO_LOGIN"),
+    )
+    """If True, browser requests are redirected into the TWC sign-in flow automatically."""
     twc_auth_server_overrides: dict[str, Any] | str | None = Field(
         default=None,
         validation_alias=AliasChoices("TWC_AUTH_SERVER_OVERRIDES", "LANGFLOW_TWC_AUTH_SERVER_OVERRIDES"),
