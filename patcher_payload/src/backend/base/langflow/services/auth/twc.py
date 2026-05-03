@@ -12,6 +12,7 @@ import httpx
 import jwt
 from fastapi import HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlmodel import select
 
 from langflow.api.utils import DbSession
@@ -89,6 +90,16 @@ class TWCSessionData(BaseModel):
 
     def has_refresh_token(self) -> bool:
         return bool(self.refresh_token)
+
+
+def _normalized_twc_username_candidates(*, username: str, server_id: str) -> list[str]:
+    username_base = username.strip().lower().replace(" ", "-")
+    username_base = "".join(char for char in username_base if char.isalnum() or char in {"-", "_", "."})[:40] or "twc-user"
+
+    candidates = [username_base]
+    if server_id not in username_base:
+        candidates.append(f"{username_base}-{server_id}"[:48])
+    return candidates
 
 
 def _safe_next(next_url: str | None) -> str:
@@ -793,12 +804,47 @@ async def get_or_create_twc_user(session: DbSession, identity: TWCIdentity, *, s
         await session.flush()
         return user
 
-    username_base = identity.username.strip().lower().replace(" ", "-")
-    username_base = "".join(char for char in username_base if char.isalnum() or char in {"-", "_", "."})[:40] or "twc-user"
+    username_candidates = _normalized_twc_username_candidates(username=identity.username, server_id=server_id)
 
-    username_candidates = [username_base]
-    if server_id not in username_base:
-        username_candidates.append(f"{username_base}-{server_id}"[:48])
+    existing_user = None
+    for candidate in username_candidates:
+        existing_user = (
+            await session.exec(select(User).where(func.lower(User.username) == candidate.lower()))
+        ).first()
+        if existing_user is not None:
+            break
+
+    if existing_user is not None:
+        existing_profile = (await session.exec(select(SSOUserProfile).where(SSOUserProfile.user_id == existing_user.id))).first()
+        if existing_profile:
+            if (
+                existing_profile.sso_provider == TWC_PROVIDER
+                and existing_profile.sso_user_id == identity.external_user_id
+            ):
+                existing_profile.email = identity.email
+                existing_profile.sso_last_login_at = now
+                existing_profile.updated_at = now
+                await session.flush()
+                return existing_user
+
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Existing Langflow user '{existing_user.username}' is already linked to "
+                    f"{existing_profile.sso_provider} and cannot be auto-bound to this TWC identity."
+                ),
+            )
+
+        profile = SSOUserProfile(
+            user_id=existing_user.id,
+            sso_provider=TWC_PROVIDER,
+            sso_user_id=identity.external_user_id,
+            email=identity.email,
+            sso_last_login_at=now,
+        )
+        session.add(profile)
+        await session.flush()
+        return existing_user
 
     username = None
     for candidate in username_candidates:

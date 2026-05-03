@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import AlertDropdown from "@/alerts/alertDropDown";
 import LangflowLogo from "@/assets/LangflowLogo.svg?react";
 import ForwardedIconComponent from "@/components/common/genericIconComponent";
 import ModelProviderCount from "@/components/common/modelProviderCountComponent";
 import ShadTooltip from "@/components/common/shadTooltipComponent";
+import { useGetTWCStatus } from "@/controllers/API/queries/auth";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import CustomAccountMenu from "@/customization/components/custom-AccountMenu";
@@ -16,6 +17,53 @@ import useAlertStore from "@/stores/alertStore";
 import FlowShareInvitePrompt from "../flowShareInvitePrompt";
 import FlowMenu from "./components/FlowMenu";
 
+function getTWCDisplayUsername(status: {
+  authenticated?: boolean;
+  username?: string | null;
+  current_user?: Record<string, unknown> | null;
+}): string | null {
+  if (!status?.authenticated) {
+    return null;
+  }
+
+  const currentUser = status.current_user ?? {};
+  const directCandidates = [
+    currentUser["principal"],
+    currentUser["userPrincipalName"],
+    currentUser["userName"],
+    currentUser["username"],
+    currentUser["login"],
+  ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+
+  const qualifiedCandidate = directCandidates.find((value) => value.includes("\\"));
+  if (qualifiedCandidate) {
+    return qualifiedCandidate;
+  }
+
+  const usernameCandidate =
+    directCandidates[0] ??
+    (typeof status.username === "string" && status.username.trim().length > 0
+      ? status.username
+      : null);
+
+  if (!usernameCandidate) {
+    return null;
+  }
+
+  const domainCandidate = [
+    currentUser["domain"],
+    currentUser["domainName"],
+    currentUser["windowsDomain"],
+    currentUser["authenticationDomain"],
+  ].find((value): value is string => typeof value === "string" && value.trim().length > 0);
+
+  if (domainCandidate) {
+    return `${domainCandidate}\\${usernameCandidate}`;
+  }
+
+  return usernameCandidate;
+}
+
 export default function AppHeader(): JSX.Element {
   const { t } = useTranslation();
   const notificationCenter = useAlertStore((state) => state.notificationCenter);
@@ -23,7 +71,13 @@ export default function AppHeader(): JSX.Element {
   const [activeState, setActiveState] = useState<"notifications" | null>(null);
   const notificationRef = useRef<HTMLButtonElement | null>(null);
   const notificationContentRef = useRef<HTMLDivElement | null>(null);
+  const { data: twcStatus } = useGetTWCStatus();
   useTheme();
+
+  const twcDisplayUsername = useMemo(
+    () => getTWCDisplayUsername(twcStatus ?? {}),
+    [twcStatus],
+  );
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -70,6 +124,15 @@ export default function AppHeader(): JSX.Element {
         >
           <LangflowLogo className="h-5 w-5" />
         </Button>
+        {twcDisplayUsername && (
+          <div
+            className="hidden max-w-[260px] truncate text-sm font-medium text-muted-foreground lg:block"
+            data-testid="header_twc_username"
+            title={twcDisplayUsername}
+          >
+            {twcDisplayUsername}
+          </div>
+        )}
         <CustomOrgSelector />
       </div>
 
