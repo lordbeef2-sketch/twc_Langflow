@@ -7,7 +7,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urlparse, urlunparse
+from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 import httpx
 import jwt
@@ -1073,12 +1073,25 @@ async def validate_and_refresh_twc_session(session_data: TWCSessionData, *, requ
 
 
 def build_login_error_redirect(*, request: Request, message: str) -> str:
+    return build_twc_login_page_url(request=request, message=message)
+
+
+def build_twc_login_page_url(*, request: Request, next_url: str | None = None, message: str | None = None) -> str:
     callback_url = get_twc_callback_url(request)
     parsed = urlparse(callback_url)
     _, _, app_prefix = _get_app_prefix_from_callback_url(callback_url)
     normalized_login_path = f"{app_prefix}/login" if app_prefix else "/login"
-    query = urlencode({"twc_error": message})
-    return f"{parsed.scheme}://{parsed.netloc}{normalized_login_path}?{query}"
+
+    query_params: dict[str, str] = {}
+    safe_next = _safe_next(next_url)
+    if safe_next != "/":
+        query_params["next"] = safe_next
+    if message:
+        query_params["twc_error"] = message
+
+    query = urlencode(query_params)
+    base_url = f"{parsed.scheme}://{parsed.netloc}{normalized_login_path}"
+    return f"{base_url}?{query}" if query else base_url
 
 
 def is_twc_auto_login_enabled() -> bool:
@@ -1142,18 +1155,225 @@ def _get_default_ready_twc_server() -> TWCServerConfig | None:
     return None
 
 
-def _build_twc_retry_path(request: Request, server_id: str) -> str:
+def _build_twc_signin_path(request: Request, server_id: str, *, next_url: str | None = None) -> str:
     callback_url = get_twc_callback_url(request)
     _, _, app_prefix = _get_app_prefix_from_callback_url(callback_url)
-    server_segment = server_id.replace("/", "%2F")
+    server_segment = quote(server_id, safe="")
     if app_prefix:
-        return f"{app_prefix}/api/auth/signin/{server_segment}"
-    return f"/api/auth/signin/{server_segment}"
+        base_path = f"{app_prefix}/api/auth/signin/{server_segment}"
+    else:
+        base_path = f"/api/auth/signin/{server_segment}"
+
+    safe_next = _safe_next(next_url)
+    if safe_next == "/":
+        return base_path
+    return f"{base_path}?{urlencode({'next': safe_next})}"
+
+
+def build_twc_login_page(*, request: Request, next_url: str | None = None, message: str | None = None) -> HTMLResponse:
+    servers = load_twc_server_configs()
+    ready_servers = [server for server in servers if server.ready]
+    safe_next = _safe_next(next_url)
+
+    error_markup = ""
+    if message:
+        error_markup = f'<div class="notice notice-error">{html.escape(message)}</div>'
+
+    configuration_markup = ""
+    if servers and not ready_servers:
+        configuration_error = next((server.error for server in servers if server.error), None) or (
+            "No valid Teamwork Cloud server is configured."
+        )
+        configuration_markup = f'<div class="notice notice-muted">{html.escape(configuration_error)}</div>'
+
+    button_markup = ""
+    if ready_servers:
+        if len(ready_servers) == 1:
+            server = ready_servers[0]
+            label = "Sign in via TWC"
+            href = _build_twc_signin_path(request, server.id, next_url=safe_next)
+            button_markup = f'<a class="twc-button" href="{html.escape(href)}">{html.escape(label)}</a>'
+        else:
+            buttons = []
+            for server in ready_servers:
+                href = _build_twc_signin_path(request, server.id, next_url=safe_next)
+                buttons.append(
+                    f'<a class="twc-button" href="{html.escape(href)}">{html.escape(server.label)}</a>'
+                )
+            button_markup = '<div class="button-stack">' + "".join(buttons) + "</div>"
+
+    guidance_markup = (
+        "Use your Teamwork Cloud identity provider to sign in."
+        if ready_servers
+        else "Resolve the Teamwork Cloud configuration issue below to continue."
+    )
+    destination_markup = ""
+    if safe_next != "/":
+        destination_markup = (
+            f'<p class="destination">After sign-in you will return to <code>{html.escape(safe_next)}</code>.</p>'
+        )
+
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Langflow sign-in</title>
+    <style>
+        :root {{
+            color-scheme: light;
+            --bg: #eef2f8;
+            --panel: #ffffff;
+            --text: #112033;
+            --muted: #5a6b80;
+            --line: #d7dfea;
+            --accent: #0f6cbd;
+            --accent-hover: #0a5ca4;
+            --error-bg: #fff3f2;
+            --error-line: #f3c8c2;
+            --error-text: #8a1c11;
+            --muted-bg: #f4f7fb;
+        }}
+        * {{ box-sizing: border-box; }}
+        body {{
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            background:
+                radial-gradient(circle at top, rgba(15, 108, 189, 0.12), transparent 42%),
+                linear-gradient(180deg, #f8fbff 0%, var(--bg) 100%);
+            color: var(--text);
+            font-family: "Segoe UI", system-ui, sans-serif;
+        }}
+        .panel {{
+            width: min(420px, 100%);
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 20px;
+            padding: 32px 28px;
+            box-shadow: 0 24px 60px rgba(17, 32, 51, 0.12);
+        }}
+        .brand {{
+            width: 48px;
+            height: 48px;
+            border-radius: 16px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: #fff;
+            background: linear-gradient(135deg, #0f6cbd 0%, #4d9de0 100%);
+            margin-bottom: 18px;
+        }}
+        h1 {{
+            margin: 0 0 10px;
+            font-size: 1.75rem;
+            line-height: 1.2;
+        }}
+        p {{
+            margin: 0 0 18px;
+            color: var(--muted);
+            line-height: 1.55;
+        }}
+        .destination {{
+            margin-top: -6px;
+            margin-bottom: 18px;
+            font-size: 0.92rem;
+        }}
+        code {{
+            padding: 1px 6px;
+            border-radius: 999px;
+            background: var(--muted-bg);
+            color: var(--text);
+            font-family: Consolas, monospace;
+            font-size: 0.88rem;
+        }}
+        .notice {{
+            border-radius: 14px;
+            padding: 14px 16px;
+            line-height: 1.55;
+            margin-bottom: 14px;
+            border: 1px solid var(--line);
+        }}
+        .notice-error {{
+            background: var(--error-bg);
+            border-color: var(--error-line);
+            color: var(--error-text);
+        }}
+        .notice-muted {{
+            background: var(--muted-bg);
+            color: var(--muted);
+        }}
+        .button-stack {{
+            display: grid;
+            gap: 12px;
+        }}
+        .twc-button {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            min-height: 48px;
+            padding: 0 18px;
+            border-radius: 999px;
+            background: var(--accent);
+            color: #fff;
+            text-decoration: none;
+            font-weight: 600;
+            transition: background 120ms ease-in-out;
+        }}
+        .twc-button:hover {{
+            background: var(--accent-hover);
+        }}
+        .footnote {{
+            margin-top: 18px;
+            font-size: 0.92rem;
+        }}
+    </style>
+</head>
+<body>
+    <main class="panel">
+        <div class="brand">LF</div>
+        <h1>Sign in to Langflow</h1>
+        <p>{html.escape(guidance_markup)}</p>
+        {destination_markup}
+        {error_markup}
+        {configuration_markup}
+        {button_markup}
+        <p class="footnote">Local username and password sign-in is disabled for this workspace.</p>
+    </main>
+</body>
+</html>
+"""
+    response = HTMLResponse(page)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _build_twc_signin_redirect_response(request: Request, *, next_url: str | None = None) -> Response | None:
+    server = _get_default_ready_twc_server()
+    if server is None:
+        return None
+
+    target_url, nonce = build_signin_redirect(
+        server,
+        callback_url=get_twc_callback_url(request),
+        next_url=_safe_next(next_url),
+    )
+    response = RedirectResponse(url=target_url, status_code=307)
+    set_cookie(response, TWC_STATE_NONCE_COOKIE, nonce, max_age=600)
+    set_cookie(response, TWC_STATE_SERVER_COOKIE, server.id, max_age=600)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def build_twc_auto_login_error_page(*, request: Request, message: str) -> HTMLResponse:
     retry_server = _get_default_ready_twc_server()
-    retry_href = _build_twc_retry_path(request, retry_server.id) if retry_server else None
+    retry_href = _build_twc_signin_path(request, retry_server.id) if retry_server else None
     escaped_message = html.escape(message)
     retry_markup = (
         f'<a class="twc-retry" href="{html.escape(retry_href)}">Try TWC sign-in again</a>' if retry_href else ""
@@ -1246,39 +1466,58 @@ def build_twc_auto_login_error_page(*, request: Request, message: str) -> HTMLRe
     return response
 
 
-def maybe_build_twc_auto_login_response(request: Request) -> Response | None:
-    if not is_twc_auto_login_enabled():
-        return None
+def maybe_build_twc_login_response(request: Request) -> Response | None:
     if request.method.upper() not in {"GET", "HEAD"}:
         return None
-    if request.query_params.get("skip_twc_auto_login"):
+    if is_twc_auto_login_enabled() and request.query_params.get("skip_twc_auto_login"):
         return None
     if _has_langflow_auth_cookies(request):
         return None
     if not _is_browser_navigation(request):
         return None
 
+    servers = load_twc_server_configs()
+    if not servers:
+        return None
+
     path = request.url.path or "/"
+
+    if path == "/login":
+        if is_twc_auto_login_enabled() and request.query_params.get("twc_error"):
+            return build_twc_auto_login_error_page(request=request, message=request.query_params.get("twc_error") or "")
+        if is_twc_auto_login_enabled():
+            auto_redirect_response = _build_twc_signin_redirect_response(
+                request,
+                next_url=request.query_params.get("next"),
+            )
+            if auto_redirect_response is not None:
+                return auto_redirect_response
+        return build_twc_login_page(
+            request=request,
+            next_url=request.query_params.get("next"),
+            message=request.query_params.get("twc_error"),
+        )
+
     if _is_twc_auto_login_path_excluded(path):
         return None
 
-    if path == "/login" and request.query_params.get("twc_error"):
-        return build_twc_auto_login_error_page(request=request, message=request.query_params.get("twc_error") or "")
+    if not is_twc_auto_login_enabled():
+        return RedirectResponse(
+            url=build_twc_login_page_url(request=request, next_url=_get_auto_login_next_url(request)),
+            status_code=307,
+        )
 
-    server = _get_default_ready_twc_server()
-    if server is None:
-        return None
-
-    target_url, nonce = build_signin_redirect(
-        server,
-        callback_url=get_twc_callback_url(request),
+    auto_redirect_response = _build_twc_signin_redirect_response(
+        request,
         next_url=_get_auto_login_next_url(request),
     )
-    response = RedirectResponse(url=target_url, status_code=307)
-    set_cookie(response, TWC_STATE_NONCE_COOKIE, nonce, max_age=600)
-    set_cookie(response, TWC_STATE_SERVER_COOKIE, server.id, max_age=600)
-    response.headers["Cache-Control"] = "no-store"
-    return response
+    if auto_redirect_response is None:
+        return build_twc_login_page(
+            request=request,
+            next_url=_get_auto_login_next_url(request),
+            message=request.query_params.get("twc_error"),
+        )
+    return auto_redirect_response
 
 
 def extract_proxy_token_bundle(request: Request) -> dict[str, str] | None:

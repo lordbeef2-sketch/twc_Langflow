@@ -14,7 +14,7 @@ from langflow.services.auth.twc import (
     TWC_STATE_SERVER_COOKIE,
     TWCServerConfig,
     build_identity,
-    build_login_error_redirect,
+    build_twc_login_page_url,
     build_signin_redirect,
     build_twc_session,
     clear_twc_session_cookie,
@@ -83,8 +83,11 @@ def _clear_langflow_auth_cookies(response: Response) -> None:
     delete_cookie(response, "apikey_tkn_lflw")
 
 
-def _redirect_with_error(request: Request, message: str) -> RedirectResponse:
-    response = RedirectResponse(url=build_login_error_redirect(request=request, message=message), status_code=302)
+def _redirect_with_error(request: Request, message: str, next_url: str | None = None) -> RedirectResponse:
+    response = RedirectResponse(
+        url=build_twc_login_page_url(request=request, next_url=next_url, message=message),
+        status_code=302,
+    )
     clear_twc_state_cookies(response)
     return response
 
@@ -153,13 +156,13 @@ async def twc_callback(
     cookie_nonce = request.cookies.get(TWC_STATE_NONCE_COOKIE)
     cookie_server = request.cookies.get(TWC_STATE_SERVER_COOKIE)
     if not cookie_nonce or cookie_nonce != state_payload.get("nonce"):
-        return _redirect_with_error(request, "Invalid or tampered TWC login state.")
+        return _redirect_with_error(request, "Invalid or tampered TWC login state.", state_payload.get("next"))
     if cookie_server and cookie_server != state_payload.get("server_id"):
-        return _redirect_with_error(request, "The selected TWC server changed during login.")
+        return _redirect_with_error(request, "The selected TWC server changed during login.", state_payload.get("next"))
 
     if error:
         message = error_description or error
-        return _redirect_with_error(request, f"TWC login was canceled or failed: {message}")
+        return _redirect_with_error(request, f"TWC login was canceled or failed: {message}", state_payload.get("next"))
 
     try:
         server = get_twc_server(str(state_payload["server_id"]), require_ready=True)
@@ -173,6 +176,7 @@ async def twc_callback(
                 return _redirect_with_error(
                     request,
                     "Missing authorization code from the TWC Authentication Server callback.",
+                    state_payload.get("next"),
                 )
 
         rest_token = token_data.get("id_token") or token_data.get("access_token")
@@ -180,6 +184,7 @@ async def twc_callback(
             return _redirect_with_error(
                 request,
                 "TWC token response did not include an id_token or access_token.",
+                state_payload.get("next"),
             )
 
         current_user = await validate_current_user(server, rest_token)
@@ -210,7 +215,7 @@ async def twc_callback(
         return response
     except Exception as exc:  # noqa: BLE001
         message = getattr(exc, "detail", str(exc))
-        return _redirect_with_error(request, str(message))
+        return _redirect_with_error(request, str(message), state_payload.get("next"))
 
 
 @router.post("/logout")

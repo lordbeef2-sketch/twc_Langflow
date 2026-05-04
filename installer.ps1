@@ -339,9 +339,9 @@ Ok "Installed $frontendFiles frontend files"
 
 Info "Ensuring LANGFLOW_AUTO_LOGIN=false in $EnvFile"
 Ensure-EnvSetting -envFile $EnvFile -key "LANGFLOW_AUTO_LOGIN" -value "false"
-Info "Ensuring TWC_AUTO_LOGIN=true in $EnvFile"
-Ensure-EnvSetting -envFile $EnvFile -key "TWC_AUTO_LOGIN" -value "true"
-Ok "Configured .env with LANGFLOW_AUTO_LOGIN=false and TWC_AUTO_LOGIN=true"
+Info "Ensuring TWC_AUTO_LOGIN=false in $EnvFile"
+Ensure-EnvSetting -envFile $EnvFile -key "TWC_AUTO_LOGIN" -value "false"
+Ok "Configured .env with LANGFLOW_AUTO_LOGIN=false and TWC_AUTO_LOGIN=false"
 
 Write-InstallState `
   -path $StateFile `

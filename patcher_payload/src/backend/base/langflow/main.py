@@ -39,7 +39,7 @@ from langflow.initial_setup.setup import (
 )
 from langflow.middleware import ContentSizeLimitMiddleware
 from langflow.plugin_routes import load_plugin_routes
-from langflow.services.auth.twc import maybe_build_twc_auto_login_response
+from langflow.services.auth.twc import maybe_build_twc_login_response
 from langflow.services.deps import (
     get_queue_service,
     get_service,
@@ -497,7 +497,7 @@ def create_app():
 
     @app.middleware("http")
     async def twc_auto_login(request: Request, call_next):
-        auto_login_response = maybe_build_twc_auto_login_response(request)
+        auto_login_response = maybe_build_twc_login_response(request)
         if auto_login_response is not None:
             return auto_login_response
         return await call_next(request)

@@ -11,7 +11,7 @@ APP_ORIGIN=https://langflow.example.com
 TWC_PRESET_SERVERS=[{"id":"prod","name":"Production TWC","base_url":"https://twc.example.com:8111","verify_tls":true,"enabled":true,"display_order":1}]
 TWC_AUTH_CLIENT_ID=langflow-client
 TWC_AUTH_CLIENT_SECRET=replace-with-authentication-client-secret
-TWC_AUTO_LOGIN=true
+TWC_AUTO_LOGIN=false
 LANGFLOW_AUTO_LOGIN=false
 TWC_AUTH_CALLBACK_PATH=/api/auth/callback
 TWC_AUTH_SCOPE=openid
@@ -118,11 +118,17 @@ https://langflow.example.com/api/auth/callback
 
 Backward-compatible callback routes still exist under `/api/v1/auth/twc/callback`, but a New Project-style setup can now use `/api/auth/callback` directly.
 
-## Auto SSO behavior
+## Login behavior
 
-Set `TWC_AUTO_LOGIN=true` to have Langflow redirect browser page requests straight into the Teamwork Cloud sign-in flow without showing the local username/password form first.
+Keep `TWC_AUTO_LOGIN=false` when you want Langflow to show a login screen first but still require Teamwork Cloud sign-in.
 
 Keep `LANGFLOW_AUTO_LOGIN=false`. That setting belongs to Langflow's built-in default-superuser mode and is not part of the TWC SSO flow.
+
+When `TWC_AUTO_LOGIN=false`:
+
+- unauthenticated browser requests are redirected to a Langflow sign-in page instead of directly into the IdP
+- the login page only offers Teamwork Cloud sign-in
+- local username/password sign-in stays disabled for this workspace
 
 When `TWC_AUTO_LOGIN=true`:
 
