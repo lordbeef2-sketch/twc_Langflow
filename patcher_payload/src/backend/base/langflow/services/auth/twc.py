@@ -1203,15 +1203,10 @@ def build_twc_login_page(*, request: Request, next_url: str | None = None, messa
             button_markup = '<div class="button-stack">' + "".join(buttons) + "</div>"
 
     guidance_markup = (
-        "Use your Teamwork Cloud identity provider to sign in."
+        "Use your Teamwork Cloud Account to sign in."
         if ready_servers
         else "Resolve the Teamwork Cloud configuration issue below to continue."
     )
-    destination_markup = ""
-    if safe_next != "/":
-        destination_markup = (
-            f'<p class="destination">After sign-in you will return to <code>{html.escape(safe_next)}</code>.</p>'
-        )
 
     page = f"""<!doctype html>
 <html lang="en">
@@ -1279,19 +1274,6 @@ def build_twc_login_page(*, request: Request, next_url: str | None = None, messa
             color: var(--muted);
             line-height: 1.55;
         }}
-        .destination {{
-            margin-top: -6px;
-            margin-bottom: 18px;
-            font-size: 0.92rem;
-        }}
-        code {{
-            padding: 1px 6px;
-            border-radius: 999px;
-            background: var(--muted-bg);
-            color: var(--text);
-            font-family: Consolas, monospace;
-            font-size: 0.88rem;
-        }}
         .notice {{
             border-radius: 14px;
             padding: 14px 16px;
@@ -1329,10 +1311,6 @@ def build_twc_login_page(*, request: Request, next_url: str | None = None, messa
         .twc-button:hover {{
             background: var(--accent-hover);
         }}
-        .footnote {{
-            margin-top: 18px;
-            font-size: 0.92rem;
-        }}
     </style>
 </head>
 <body>
@@ -1340,11 +1318,9 @@ def build_twc_login_page(*, request: Request, next_url: str | None = None, messa
         <div class="brand">LF</div>
         <h1>Sign in to Langflow</h1>
         <p>{html.escape(guidance_markup)}</p>
-        {destination_markup}
         {error_markup}
         {configuration_markup}
         {button_markup}
-        <p class="footnote">Local username and password sign-in is disabled for this workspace.</p>
     </main>
 </body>
 </html>
