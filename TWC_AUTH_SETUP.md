@@ -1,39 +1,44 @@
-# Langflow authentication and sharing
+# Langflow TWC OpenID setup
 
-This package installs the current Langflow release and applies the local
-knowledge-base, ingestion, component, and Windows runtime patches.
+This package keeps Langflow's native users, permissions, and flow/project
+sharing. It adds one GUI-managed authentication lane for Teamwork Cloud:
+OpenID Connect (OIDC).
 
-The package does **not** add a custom Teamwork Cloud authentication layer.
-Langflow's stock authentication and authorization remain the source of truth.
-The packaged local install keeps Langflow's default auto-login mode, so it does
-not require a username or password on first launch:
+## Configure it in the GUI
 
-```env
-LANGFLOW_AUTO_LOGIN=true
+1. Launch Langflow and sign in as the local administrator.
+2. Open **Settings → OAuth SSO**.
+3. Enable SSO, then enter the TWC OpenID client ID, client secret, discovery
+   URL (or the explicit OIDC endpoints), redirect URI, scopes, and claim names.
+4. Save. Langflow encrypts the client secret in its database and switches the
+   live login path to TWC OpenID. No `.env` edit or hand-maintained config is
+   required.
+
+Register this exact callback in the TWC OpenID client:
+
+```text
+<public Langflow URL>/api/v1/sso/callback
 ```
 
-For a deliberately protected multi-user deployment, set
-`LANGFLOW_AUTO_LOGIN=false` and configure Langflow's own superuser credentials.
-Do not add TWC OAuth, OpenID, SAML, callback, or TWC preset-server variables to
-this package. They are not consumed by the installed Langflow runtime.
+The GUI hides the retired SAML lane. This patch does not add OAuth-password,
+SAML, or a second TWC authentication system.
 
-## Flow sharing
+## Sharing
 
-User and team flow sharing remains provided by Langflow's native authorization
-system. The native share UI and `/api/v1/authz/shares` routes are retained.
-Sharing uses the Langflow users and authorization records; no separate TWC
-identity bridge is installed.
+Native Langflow flow/project sharing remains installed. After a user signs in
+through TWC OpenID, Langflow maps the TWC subject to a local user profile, so
+existing sharing and permissions apply to that user.
+
+## Local fallback
+
+Keep the local administrator session open while testing the provider. The GUI
+toggle can disable the provider without editing environment files. The stock
+local login route remains available for a configured Langflow administrator.
 
 ## Install and verify
 
-Run the installer from this directory, then validate the local runtime:
-
 ```powershell
-.\installer.ps1 -InstallRoot . -Force -SkipAuthAddition
+.\installer.ps1 -InstallRoot . -Force
 .\launcher.ps1 -ValidateOnly
 .\launcher.ps1
 ```
-
-The installer keeps the freshly downloaded Langflow frontend and skips the old
-custom auth/sharing overlay. It also keeps the local-only runtime guard,
-knowledge-base/ingestion patches, and LFX component overlays.

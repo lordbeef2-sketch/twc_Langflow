@@ -14,9 +14,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# The current package intentionally ships without the legacy custom TWC/OIDC/
-# SAML authentication addition.  Keep the switch for backwards-compatible
-# command lines, but always install stock Langflow authentication and sharing.
+# The package keeps Langflow's native authentication, authorization, and
+# sharing, then adds the single GUI-managed TWC OpenID lane below. Keep the
+# switch for backwards-compatible command lines; it only controls legacy
+# overlay files and never removes the TWC OpenID GUI/backend.
 $SkipAuthAddition = $true
 
 function Info([string]$msg) { Write-Host "[installer] $msg" -ForegroundColor Cyan }
@@ -427,16 +428,68 @@ function Test-SkipAuthAdditionPath([string]$relativePath) {
   $normalized = $relativePath.Replace('/', '\').ToLowerInvariant()
 
   # Langflow 1.12 already ships its own auth/authz and sharing implementation.
-  # Do not overlay the older custom SSO or flow-sharing files from this payload.
+  # Do not overlay the older mixed SAML/flow-sharing files from this payload.
   return (
     $normalized -match '(^|\\)(main\.py|api\\router\.py|api\\v1\\__init__\.py)$' -or
-    $normalized -match '(^|\\)api\\v1\\(admin_settings|sso|users|flows|flows_helpers)\.py$' -or
+    $normalized -match '(^|\\)api\\v1\\(admin_settings|users|flows|flows_helpers)\.py$' -or
     $normalized -match '(^|\\)api\\v1\\schemas\\__init__\.py$' -or
     $normalized -match '(^|\\)services\\database\\models\\(__init__|flow\\model|user\\model)\.py$' -or
     $normalized -match '(^|\\)services\\database\\models\\flow_share\\' -or
     $normalized -match '(^|\\)alembic\\versions\\(a7c9d4e1f0b2|c8f2a9d0e1b3|f4a1c2d3e4b5)' -or
     $normalized -match '(^|\\)services\\settings\\base\.py$'
   )
+}
+
+function Patch-StockRouterForTWCOpenId([string]$langflowRoot) {
+  $routerPath = Join-Path $langflowRoot "api\router.py"
+  Assert-PathWithinRoot -path $routerPath -root $langflowRoot
+  if (-not (Test-Path -LiteralPath $routerPath)) { Fail "Missing stock Langflow API router: $routerPath" }
+  $content = Get-Content -LiteralPath $routerPath -Raw
+  if ($content -notmatch 'langflow\.api\.v1\.sso') {
+    $content = $content.Replace(
+      'from langflow.api.v1.voice_mode import router as voice_mode_router',
+      "from langflow.api.v1.voice_mode import router as voice_mode_router`r`nfrom langflow.api.v1.sso import admin_router as twc_sso_admin_router, router as twc_sso_router"
+    )
+    $content = $content.Replace(
+      'router_v1.include_router(login_router)',
+      "router_v1.include_router(login_router)`r`nrouter_v1.include_router(twc_sso_router)`r`nrouter_v1.include_router(twc_sso_admin_router)"
+    )
+    Set-Content -LiteralPath $routerPath -Value $content -Encoding UTF8
+  }
+  Ok "Mounted TWC OpenID routes in Langflow's stock API router"
+}
+
+function Patch-StockLoginForTWCOpenId([string]$langflowRoot) {
+  $loginPath = Join-Path $langflowRoot "api\v1\login.py"
+  Assert-PathWithinRoot -path $loginPath -root $langflowRoot
+  if (-not (Test-Path -LiteralPath $loginPath)) { Fail "Missing stock Langflow login router: $loginPath" }
+  $content = Get-Content -LiteralPath $loginPath -Raw
+  if ($content -notmatch 'is_sso_enabled') {
+    $content = $content.Replace(
+      '    if auth_settings.AUTO_LOGIN:',
+      '    if auth_settings.AUTO_LOGIN and not await _twc_sso_enabled(db):'
+    )
+    $content = $content.Replace(
+      'from langflow.services.auth.exceptions import AuthenticationError',
+      "from langflow.api.v1.sso import is_sso_enabled as _twc_sso_enabled`r`nfrom langflow.services.auth.exceptions import AuthenticationError"
+    )
+    Set-Content -LiteralPath $loginPath -Value $content -Encoding UTF8
+  }
+  Ok "Guarded stock auto-login when TWC OpenID is enabled"
+}
+
+function Install-TwcOpenIdUi([string]$payloadRoot, [string]$frontendRoot) {
+  $uiSource = Join-Path $payloadRoot "twc-openid-ui.js"
+  $uiTarget = Join-Path $frontendRoot "twc-openid-ui.js"
+  if (-not (Test-Path -LiteralPath $uiSource)) { Fail "Missing TWC OpenID UI asset: $uiSource" }
+  Copy-Item -LiteralPath $uiSource -Destination $uiTarget -Force
+  $indexPath = Join-Path $frontendRoot "index.html"
+  $index = Get-Content -LiteralPath $indexPath -Raw
+  if ($index -notmatch 'twc-openid-ui\.js') {
+    $index = $index.Replace('</head>', "    <script src=`"./twc-openid-ui.js`"></script>`r`n  </head>")
+    Set-Content -LiteralPath $indexPath -Value $index -Encoding UTF8
+  }
+  Ok "Installed GUI-only TWC OpenID sign-in control"
 }
 
 function Copy-Tree([string]$sourceRoot, [string]$destinationRoot, [switch]$SkipAuthOverlay) {
@@ -813,6 +866,8 @@ if ($HasMatchingPatchedInstall) {
 Info "Applying backend patch files to $LangflowRoot"
 $backendCopied = Copy-Tree -sourceRoot $BackendPayloadRoot -destinationRoot $LangflowRoot -SkipAuthOverlay:$SkipAuthAddition
 Ok "Copied $backendCopied backend files"
+Patch-StockRouterForTWCOpenId -langflowRoot $LangflowRoot
+Patch-StockLoginForTWCOpenId -langflowRoot $LangflowRoot
 Patch-LangflowCliLocalOnlyVersionCheck -LangflowRoot $LangflowRoot
 if (-not $SkipAuthAddition) {
   Patch-LangflowLoginLocalOnlyVariableInit -LangflowRoot $LangflowRoot
@@ -840,12 +895,13 @@ foreach ($relativeStaleFile in $staleLfxFiles) {
 }
 
 $InstalledFrontendRoot = Join-Path $LangflowRoot "frontend"
-if ($SkipAuthAddition) {
-  Info "Keeping the freshly downloaded Langflow frontend; old custom auth/sharing overlay skipped"
+if ($SkipAuthAddition -and -not (Test-Path -LiteralPath $FrontendBundlePath)) {
+  Info "Keeping the freshly downloaded Langflow frontend; no custom GUI bundle supplied"
 } else {
   Info "Replacing built frontend assets in $InstalledFrontendRoot"
   $frontendFiles = Install-FrontendBundle -bundlePath $FrontendBundlePath -destinationRoot $InstalledFrontendRoot
   Ok "Installed $frontendFiles frontend files"
+  Install-TwcOpenIdUi -payloadRoot $PayloadRoot -frontendRoot $InstalledFrontendRoot
 }
 
 Info "Ensuring Langflow's default local auto-login mode in $EnvFile"
