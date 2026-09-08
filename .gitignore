@@ -1,5 +1,9 @@
 /.venv/
 /langflow/
+/.upstream-langflow/
+/local.settings.json
+/langpatcher-state.json
+/.env
 /test-run/
 *.log
 *.zip

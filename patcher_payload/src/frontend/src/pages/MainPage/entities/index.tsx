@@ -9,6 +9,7 @@ export type FolderType = {
   components: string[];
   readonly?: boolean;
   is_shared_folder?: boolean;
+  is_global_folder?: boolean;
 };
 
 export type PaginatedFolderType = {
@@ -20,6 +21,7 @@ export type PaginatedFolderType = {
     components: string[];
     readonly?: boolean;
     is_shared_folder?: boolean;
+    is_global_folder?: boolean;
   };
   flows: {
     items: FlowType[];

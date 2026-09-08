@@ -2,7 +2,6 @@ import asyncio
 import contextlib
 import json
 import os
-import re
 from pathlib import Path
 from shutil import copy2
 from typing import Any, Literal
@@ -10,7 +9,7 @@ from typing import Any, Literal
 import orjson
 import yaml
 from aiofile import async_open
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import Field, field_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, EnvSettingsSource, PydanticBaseSettingsSource, SettingsConfigDict
 from typing_extensions import override
@@ -162,6 +161,14 @@ class Settings(BaseSettings):
 
     disable_track_apikey_usage: bool = False
     remove_api_keys: bool = False
+    rate_limit_enabled: bool = True
+    """Enable rate limiting for the login endpoint. Set to False to disable it."""
+    rate_limit_per_minute: int = 5
+    """Number of login attempts allowed per minute per IP address."""
+    rate_limit_storage_uri: str = "memory://"
+    """Storage backend for rate limiting, such as memory:// or redis://host:port."""
+    rate_limit_trust_proxy: bool = False
+    """Trust X-Forwarded-For when Langflow is behind a trusted reverse proxy."""
     allow_custom_components: bool = True
     """If set to False, arbitrary custom component code is blocked unless it matches an approved template hash."""
     components_path: list[str] = []
@@ -182,6 +189,17 @@ class Settings(BaseSettings):
     redis_db: int = 0
     redis_url: str | None = None
     redis_cache_expire: int = 3600
+    job_queue_type: Literal["memory", "redis"] = "memory"
+    redis_queue_host: str | None = None
+    redis_queue_port: int | None = None
+    redis_queue_db: int = 1
+    redis_queue_url: str | None = None
+    redis_queue_ttl: int = 3600
+    redis_queue_startup_grace_s: float = 30.0
+    redis_queue_cancel_marker_ttl: int = 60
+    redis_queue_cancel_channel_enabled: bool = True
+    redis_queue_polling_stale_threshold_s: float = 90.0
+    redis_queue_polling_watchdog_interval_s: float = 15.0
 
     # Sentry
     sentry_dsn: str | None = None
@@ -293,93 +311,6 @@ class Settings(BaseSettings):
     """The polling interval in milliseconds for synchronizing flows from the file system."""
     mcp_base_url: str = ""
     """Base URL exposed to the frontend for MCP links and config."""
-    app_origin: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("APP_ORIGIN", "LANGFLOW_APP_ORIGIN"),
-    )
-    """Public origin for callback URL generation when Langflow is behind a reverse proxy."""
-    twc_preset_servers: list[Any] | dict[str, Any] | str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("TWC_PRESET_SERVERS", "LANGFLOW_TWC_PRESET_SERVERS"),
-    )
-    """Configured Teamwork Cloud REST servers as JSON or a comma-separated list."""
-    twc_auth_client_id: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices(
-            "TWC_AUTH_CLIENT_ID",
-            "LANGFLOW_TWC_AUTH_CLIENT_ID",
-            "TWC_AUTHENTICATION_CLIENT_ID",
-            "LANGFLOW_TWC_AUTHENTICATION_CLIENT_ID",
-            "TWC_AUTHENTICATION_CLIENT_IDS",
-            "LANGFLOW_TWC_AUTHENTICATION_CLIENT_IDS",
-            "authentication.client.ids",
-        ),
-    )
-    """Client ID registered with the TWC Authentication Server."""
-    twc_auth_client_secret: SecretStr | None = Field(
-        default=None,
-        validation_alias=AliasChoices(
-            "TWC_AUTH_CLIENT_SECRET",
-            "LANGFLOW_TWC_AUTH_CLIENT_SECRET",
-            "TWC_AUTHENTICATION_CLIENT_SECRET",
-            "LANGFLOW_TWC_AUTHENTICATION_CLIENT_SECRET",
-            "authentication.client.secret",
-        ),
-    )
-    """Shared Authentication Server secret sent in X-Auth-Secret."""
-    twc_auth_callback_path: str = Field(
-        default="/api/auth/callback",
-        validation_alias=AliasChoices("TWC_AUTH_CALLBACK_PATH", "LANGFLOW_TWC_AUTH_CALLBACK_PATH"),
-    )
-    """Callback path used for the TWC authorization-code flow."""
-    twc_auth_scope: str | None = Field(
-        default="openid",
-        validation_alias=AliasChoices("TWC_AUTH_SCOPE", "LANGFLOW_TWC_AUTH_SCOPE"),
-    )
-    """Requested TWC/OIDC scope. Blank values normalize to 'openid'."""
-    twc_auto_login: bool = Field(
-        default=False,
-        validation_alias=AliasChoices("TWC_AUTO_LOGIN", "LANGFLOW_TWC_AUTO_LOGIN"),
-    )
-    """If True, browser requests are redirected into the TWC sign-in flow automatically."""
-    twc_auth_server_overrides: dict[str, Any] | str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("TWC_AUTH_SERVER_OVERRIDES", "LANGFLOW_TWC_AUTH_SERVER_OVERRIDES"),
-    )
-    """Per-server TWC Authentication Server overrides keyed by server id or host."""
-    twc_saml_authorize_url: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("TWC_SAML_AUTHORIZE_URL", "LANGFLOW_TWC_SAML_AUTHORIZE_URL"),
-    )
-    """Optional global override for the TWC Authentication Server authorize URL."""
-    twc_saml_token_url: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("TWC_SAML_TOKEN_URL", "LANGFLOW_TWC_SAML_TOKEN_URL"),
-    )
-    """Optional global override for the TWC Authentication Server token URL."""
-    twc_saml_login_path: str = Field(
-        default="/authentication/authorize",
-        validation_alias=AliasChoices("TWC_SAML_LOGIN_PATH", "LANGFLOW_TWC_SAML_LOGIN_PATH"),
-    )
-    """Default authorize path appended to the TWC Authentication Server host."""
-    twc_saml_login_port: int = Field(
-        default=8443,
-        validation_alias=AliasChoices("TWC_SAML_LOGIN_PORT", "LANGFLOW_TWC_SAML_LOGIN_PORT"),
-    )
-    """Default authorize port used to derive the TWC Authentication Server URL."""
-    twc_saml_token_path: str = Field(
-        default="/authentication/api/token",
-        validation_alias=AliasChoices("TWC_SAML_TOKEN_PATH", "LANGFLOW_TWC_SAML_TOKEN_PATH"),
-    )
-    """Default token path appended to the TWC Authentication Server host."""
-    twc_saml_return_url_parameter: str = Field(
-        default="redirect_uri",
-        validation_alias=AliasChoices(
-            "TWC_SAML_RETURN_URL_PARAMETER",
-            "LANGFLOW_TWC_SAML_RETURN_URL_PARAMETER",
-        ),
-    )
-    """Return URL parameter name expected by the TWC Authentication Server."""
     ssl_cert_file: str | None = None
     """Path to the SSL certificate file on the local system."""
     ssl_key_file: str | None = None
@@ -499,67 +430,6 @@ class Settings(BaseSettings):
             # Convert single origin to list for consistency
             return [value]
         return value
-
-    @field_validator("twc_preset_servers", "twc_auth_server_overrides", mode="before")
-    @classmethod
-    def parse_twc_json_values(cls, value):
-        if isinstance(value, str):
-            stripped = value.strip()
-            if not stripped:
-                return None
-            if stripped.startswith("{") or stripped.startswith("["):
-                with contextlib.suppress(json.decoder.JSONDecodeError):
-                    return orjson.loads(stripped)
-        return value
-
-    @field_validator("twc_auth_callback_path", "twc_saml_login_path", "twc_saml_token_path", mode="before")
-    @classmethod
-    def normalize_twc_paths(cls, value, info):
-        if value is None:
-            return value
-        if isinstance(value, Path):
-            value = str(value)
-        value = str(value).strip()
-        if not value:
-            return value
-        if info.field_name == "twc_saml_login_path" and value.lower() in {
-            "/osmc/authen/login",
-            "/osmc/login.html",
-            "/authentication/saml2/sso/tssd-twc2024x",
-        }:
-            return "/authentication/authorize"
-        if not value.startswith("/"):
-            value = f"/{value}"
-        return value
-
-    @field_validator("twc_saml_return_url_parameter", mode="before")
-    @classmethod
-    def normalize_twc_return_url_parameter(cls, value):
-        if value is None:
-            return "redirect_uri"
-        value = str(value).strip()
-        return value or "redirect_uri"
-
-    @field_validator("twc_auth_scope", mode="before")
-    @classmethod
-    def normalize_twc_scope(cls, value):
-        if value is None:
-            return "openid"
-        value = str(value).strip()
-        return value or "openid"
-
-    @field_validator("twc_auth_client_id", mode="before")
-    @classmethod
-    def normalize_twc_client_id(cls, value):
-        if value is None:
-            return None
-        if isinstance(value, (list, tuple)):
-            value = next((str(item).strip() for item in value if str(item).strip()), None)
-            return value
-        value = str(value).strip()
-        if "," in value or ";" in value:
-            value = next((part.strip() for part in re.split(r"[;,]", value) if part.strip()), "")
-        return value or None
 
     @field_validator("use_noop_database", mode="before")
     @classmethod

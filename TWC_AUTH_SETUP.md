@@ -1,172 +1,38 @@
-# Teamwork Cloud Login Setup
+# Langflow authentication and sharing
 
-This patch adds Teamwork Cloud Authentication Server login to Langflow using the TWC authorization-code flow.
+This package installs the current Langflow release and applies the local
+knowledge-base, ingestion, component, and Windows runtime patches.
 
-## Required operator config
-
-Set these values in the environment for the Langflow process:
+The package does **not** add a custom Teamwork Cloud authentication layer.
+Langflow's stock authentication and authorization remain the source of truth.
+Configure the normal Langflow credentials for the first run:
 
 ```env
-APP_ORIGIN=https://langflow.example.com
-TWC_PRESET_SERVERS=[{"id":"prod","name":"Production TWC","base_url":"https://twc.example.com:8111","verify_tls":true,"enabled":true,"display_order":1}]
-TWC_AUTH_CLIENT_ID=langflow-client
-TWC_AUTH_CLIENT_SECRET=replace-with-authentication-client-secret
-TWC_AUTO_LOGIN=false
+LANGFLOW_SUPERUSER=admin
+LANGFLOW_SUPERUSER_PASSWORD=choose-a-password
 LANGFLOW_AUTO_LOGIN=false
-TWC_AUTH_CALLBACK_PATH=/api/auth/callback
-TWC_AUTH_SCOPE=openid
-TWC_SAML_LOGIN_PATH=/authentication/authorize
-TWC_SAML_LOGIN_PORT=8443
-TWC_SAML_TOKEN_PATH=/authentication/api/token
-TWC_SAML_RETURN_URL_PARAMETER=redirect_uri
 ```
 
-Supported aliases:
+Do not add TWC OAuth, OpenID, SAML, callback, or TWC preset-server variables to
+this package. They are not consumed by the installed Langflow runtime.
 
-- `authentication.client.ids`
-- `authentication.client.secret`
-- `TWC_AUTHENTICATION_CLIENT_ID`
-- `TWC_AUTHENTICATION_CLIENT_IDS`
-- `TWC_AUTHENTICATION_CLIENT_SECRET`
+## Flow sharing
 
-`TWC_PRESET_SERVERS` accepts:
+User and team flow sharing remains provided by Langflow's native authorization
+system. The native share UI and `/api/v1/authz/shares` routes are retained.
+Sharing uses the Langflow users and authorization records; no separate TWC
+identity bridge is installed.
 
-- a JSON array of server objects
-- a JSON object keyed by server id
-- a comma-separated list such as `prod=https://twc.example.com:8111`
+## Install and verify
 
-Each server object may include:
-
-```json
-{
-  "id": "prod",
-  "name": "Production TWC",
-  "base_url": "https://twc.example.com:8111",
-  "verify_tls": true,
-  "ca_bundle_path": "C:/certs/internal-ca.pem",
-  "enabled": true,
-  "display_order": 1
-}
-```
-
-Accepted server keys include:
-
-- `base_url` or `rest_url`
-- `name` or `label`
-- `verify_tls`
-- `ca_bundle_path`
-- `enabled`
-- `display_order`
-
-## Optional per-server overrides
-
-Use `TWC_AUTH_SERVER_OVERRIDES` when the Authentication Server host, path, client, or TLS behavior differs from the default derived values:
-
-```env
-TWC_AUTH_SERVER_OVERRIDES={
-  "prod": {
-    "authorize_url": "https://auth.example.com:8443/authentication/authorize",
-    "token_url": "https://auth.example.com:8443/authentication/api/token",
-    "verify_tls": "C:/certs/internal-ca.pem",
-    "scope": "openid",
-    "client_id": "langflow-client",
-    "client_secret": "replace-with-secret",
-    "return_url_parameter": "redirect_uri"
-  }
-}
-```
-
-Supported per-server override keys:
-
-- `authorize_url`
-- `token_url`
-- `login_path`
-- `login_port`
-- `token_path`
-- `return_url_parameter`
-- `scope`
-- `client_id`
-- `client_secret`
-- `authentication.client.id`
-- `authentication.client.ids`
-- `authentication_client_id`
-- `authentication_client_ids`
-- `authentication.client.secret`
-- `authentication_client_secret`
-- `verify_tls`
-- `ca_bundle_path`
-
-`verify_tls` supports:
-
-- `true`
-- `false`
-- a CA bundle path
-
-## Required TWC / AuthServer setup
-
-TWC operators must make sure:
-
-- the Langflow callback URL is whitelisted in `authentication.redirect.uri.whitelist`
-- the configured client id exists in `authentication.client.ids`
-- the configured secret matches `authentication.client.secret`
-
-For the default callback path, whitelist:
-
-```text
-https://langflow.example.com/api/auth/callback
-```
-
-Backward-compatible callback routes still exist under `/api/v1/auth/twc/callback`, but a New Project-style setup can now use `/api/auth/callback` directly.
-
-## Login behavior
-
-Keep `TWC_AUTO_LOGIN=false` when you want Langflow to show a login screen first but still require Teamwork Cloud sign-in.
-
-Keep `LANGFLOW_AUTO_LOGIN=false`. That setting belongs to Langflow's built-in default-superuser mode and is not part of the TWC SSO flow.
-
-When `TWC_AUTO_LOGIN=false`:
-
-- unauthenticated browser requests are redirected to a Langflow sign-in page instead of directly into the IdP
-- the login page only offers Teamwork Cloud sign-in
-- local username/password sign-in stays disabled for this workspace
-
-When `TWC_AUTO_LOGIN=true`:
-
-- unauthenticated browser requests are redirected straight to the first ready TWC server by `display_order`
-- no local username entry is required in the normal path
-- if TWC returns an error, Langflow shows an SSO error page instead of falling back to the local login form
-
-## Flow summary
-
-1. Langflow redirects the browser to `/authentication/authorize`.
-2. TWC Authentication Server handles the SAML/IdP portion.
-3. TWC redirects back to Langflow with a `code`.
-4. Langflow exchanges the code at `/authentication/api/token` using `X-Auth-Secret`.
-5. Langflow validates the returned token against `/osmc/admin/currentUser?permission=true`.
-6. Langflow keeps TWC session data server-side and uses `Authorization: Token <token>` for TWC REST calls.
-
-## Local verification
-
-Example local env:
+Run the installer from this directory, then validate the local runtime:
 
 ```powershell
-$env:APP_ORIGIN='http://127.0.0.1:7860'
-$env:TWC_PRESET_SERVERS='[{"id":"alpha","name":"Alpha TWC","base_url":"https://alpha.example.com:8111","verify_tls":false}]'
-$env:TWC_AUTH_CLIENT_ID='langflow-client'
-$env:TWC_AUTH_CLIENT_SECRET='replace-with-secret'
-$env:TWC_AUTH_CALLBACK_PATH='/api/auth/callback'
+.\installer.ps1 -InstallRoot . -Force -SkipAuthAddition
+.\launcher.ps1 -ValidateOnly
 .\launcher.ps1
 ```
 
-Expected routes:
-
-- `GET /api/auth/servers`
-- `GET /api/auth/signin/{server_id}`
-- `GET /api/auth/callback`
-- `POST /api/auth/logout`
-- `GET /api/auth/status`
-- `GET /api/v1/auth/twc/servers`
-- `GET /api/v1/auth/twc/signin/{server_id}`
-- `GET /api/v1/auth/twc/callback`
-- `POST /api/v1/auth/twc/logout`
-- `GET /api/v1/auth/twc/status`
+The installer keeps the freshly downloaded Langflow frontend and skips the old
+custom auth/sharing overlay. It also keeps the local-only runtime guard,
+knowledge-base/ingestion patches, and LFX component overlays.

@@ -7,6 +7,9 @@ import type { useQueryFunctionType } from "@/types/api";
 import type { FlowType } from "@/types/flow";
 import { processFlows } from "@/utils/reactflowUtils";
 import {
+  ALL_WORKFLOWS_FOLDER_DESCRIPTION,
+  ALL_WORKFLOWS_FOLDER_ID,
+  ALL_WORKFLOWS_FOLDER_NAME,
   SHARED_WITH_ME_FOLDER_DESCRIPTION,
   SHARED_WITH_ME_FOLDER_ID,
   SHARED_WITH_ME_FOLDER_NAME,
@@ -65,6 +68,42 @@ export const useGetFolderQuery: useQueryFunctionType<
           components: [],
           readonly: true,
           is_shared_folder: true,
+        },
+        flows: {
+          items: paginatedItems,
+          total,
+          page,
+          size,
+          pages: Math.max(1, Math.ceil(total / size)),
+        },
+      };
+    }
+
+    if (params.id === ALL_WORKFLOWS_FOLDER_ID) {
+      const queryString = new URLSearchParams({
+        ...(params.is_component ? { is_component: "true" } : {}),
+        ...(params.is_flow ? { is_flow: "true" } : {}),
+        ...(params.search ? { search: params.search } : {}),
+      });
+      const { data } = await api.get<FlowType[]>(
+        `${getURL("FLOWS")}/global/visible${queryString.toString() ? `?${queryString.toString()}` : ""}`,
+      );
+      const { flows } = processFlows(data);
+      const page = params.page ?? 1;
+      const size = params.size ?? 12;
+      const startIndex = (page - 1) * size;
+      const paginatedItems = flows.slice(startIndex, startIndex + size);
+      const total = flows.length;
+
+      return {
+        folder: {
+          id: ALL_WORKFLOWS_FOLDER_ID,
+          name: ALL_WORKFLOWS_FOLDER_NAME,
+          description: ALL_WORKFLOWS_FOLDER_DESCRIPTION,
+          parent_id: null,
+          components: [],
+          readonly: true,
+          is_global_folder: true,
         },
         flows: {
           items: paginatedItems,

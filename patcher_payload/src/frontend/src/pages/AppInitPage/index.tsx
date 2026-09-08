@@ -21,6 +21,7 @@ import { LoadingPage } from "../LoadingPage";
 export function AppInitPage() {
   const isLoading = useFlowsManagerStore((state) => state.isLoading);
   const { setUserData, storeApiKey } = useContext(AuthContext);
+  const setStoredUserData = useAuthStore((state) => state.setUserData);
   const setIsAuthenticated = useAuthStore((state) => state.setIsAuthenticated);
   const setIsAdmin = useAuthStore((state) => state.setIsAdmin);
   const autoLogin = useAuthStore((state) => state.autoLogin);
@@ -53,6 +54,7 @@ export function AppInitPage() {
   useEffect(() => {
     if (sessionData?.authenticated && sessionData.user) {
       setUserData(sessionData.user);
+      setStoredUserData(sessionData.user);
       setIsAuthenticated(true);
       setIsAdmin(sessionData.user.is_superuser || false);
       if (sessionData.store_api_key) {
@@ -60,9 +62,10 @@ export function AppInitPage() {
       }
     } else if (sessionData && !sessionData.authenticated) {
       // Explicitly not authenticated
+      setStoredUserData(null);
       setIsAuthenticated(false);
     }
-  }, [sessionData]);
+  }, [sessionData, setStoredUserData]);
 
   useEffect(() => {
     if (isConfigFetched) {

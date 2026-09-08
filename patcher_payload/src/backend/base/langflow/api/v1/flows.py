@@ -30,6 +30,7 @@ from langflow.api.v1.flows_helpers import (
     _new_flow,
     _patch_flow,
     _read_flow,
+    _read_globally_visible_flows,
     _read_flow_with_access,
     _read_shared_flows,
     _save_flow_to_fs,
@@ -169,6 +170,11 @@ async def read_flows(
                 current_user.id,
                 components_only=True if components_only else None,
             )
+            globally_visible_flows = await _read_globally_visible_flows(
+                session,
+                current_user.id,
+                components_only=True if components_only else None,
+            )
             serialized_flows = [
                 _serialize_flow(flow) for flow in owner_flows
             ] + [
@@ -182,6 +188,13 @@ async def read_flows(
                     shared_by_username=owner_username,
                 )
                 for flow, share, owner_username in shared_flows
+            ] + [
+                _serialize_flow(
+                    flow,
+                    permission=FlowAccessLevel.GLOBAL_READ,
+                    shared_by_username=owner_username,
+                )
+                for flow, owner_username in globally_visible_flows
             ]
             serialized_flows = sorted(
                 serialized_flows,
@@ -400,6 +413,41 @@ async def read_accepted_shared_flows(
             shared_by_username=owner_username,
         )
         for flow, share, owner_username in shared_flows
+    ]
+
+
+@router.get("/global/visible", response_model=list[FlowRead], status_code=200)
+async def read_globally_visible_flows(
+    *,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+    is_component: bool = False,
+    is_flow: bool = False,
+    search: str = "",
+):
+    component_filter: bool | None = None
+    if is_component:
+        component_filter = True
+    elif is_flow:
+        component_filter = False
+
+    globally_visible_flows = await _read_globally_visible_flows(
+        session,
+        current_user.id,
+        components_only=component_filter,
+        search=search or None,
+    )
+
+    if not globally_visible_flows:
+        return []
+
+    return [
+        _serialize_flow(
+            flow,
+            permission=FlowAccessLevel.GLOBAL_READ,
+            shared_by_username=owner_username,
+        )
+        for flow, owner_username in globally_visible_flows
     ]
 
 

@@ -117,6 +117,9 @@ async def patch_user(
     """Update an existing user's data."""
     update_password = bool(user_update.password)
 
+    if user_update.can_view_all_flows is not None and not user.is_superuser:
+        raise HTTPException(status_code=403, detail="Only administrators can manage all-workflows visibility")
+
     # Prevent users from deactivating their own account to avoid lockout
     if user.id == user_id and user_update.is_active is False:
         raise HTTPException(status_code=403, detail="You can't deactivate your own user account")

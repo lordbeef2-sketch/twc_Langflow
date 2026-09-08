@@ -34,7 +34,7 @@ export type FlowType = {
   public?: boolean;
   access_type?: "PUBLIC" | "PRIVATE" | "PROTECTED";
   mcp_enabled?: boolean;
-  current_user_permission?: "owner" | "read" | "edit";
+  current_user_permission?: "owner" | "read" | "edit" | "global_read";
   shared_by_username?: string | null;
   viewer_folder_id?: string | null;
 };

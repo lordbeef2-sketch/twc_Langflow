@@ -48,6 +48,10 @@ const ListComponent = ({
   const [openExportModal, setOpenExportModal] = useState(false);
   const isComponent = flowData.is_component ?? false;
   const permissionLabel = getFlowPermissionLabel(flowData);
+  const ownerContextLabel =
+    flowData.current_user_permission === "global_read"
+      ? "Owner"
+      : "Shared by";
 
   const { getIcon } = useGetTemplateStyle(flowData);
 
@@ -184,7 +188,7 @@ const ListComponent = ({
             </div>
             {flowData.shared_by_username && (
               <div className="mt-1 text-xs text-muted-foreground">
-                Shared by {flowData.shared_by_username}
+                {ownerContextLabel} {flowData.shared_by_username}
               </div>
             )}
           </div>

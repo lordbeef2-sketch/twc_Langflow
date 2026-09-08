@@ -4,6 +4,9 @@ import { useFolderStore } from "@/stores/foldersStore";
 import { useUtilityStore } from "@/stores/utilityStore";
 import type { useQueryFunctionType } from "@/types/api";
 import {
+  ALL_WORKFLOWS_FOLDER_DESCRIPTION,
+  ALL_WORKFLOWS_FOLDER_ID,
+  ALL_WORKFLOWS_FOLDER_NAME,
   SHARED_WITH_ME_FOLDER_DESCRIPTION,
   SHARED_WITH_ME_FOLDER_ID,
   SHARED_WITH_ME_FOLDER_NAME,
@@ -22,6 +25,7 @@ export const useGetFoldersQuery: useQueryFunctionType<
   const setFolders = useFolderStore((state) => state.setFolders);
   const defaultFolderName = useUtilityStore((state) => state.defaultFolderName);
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const userData = useAuthStore((state) => state.userData);
 
   const getFoldersFn = async (): Promise<FolderType[]> => {
     const res = await api.get(`${getURL("PROJECTS")}/`);
@@ -40,14 +44,28 @@ export const useGetFoldersQuery: useQueryFunctionType<
       readonly: true,
       is_shared_folder: true,
     };
-    const folders = [...data, sharedFolder];
+    const allWorkflowsFolder: FolderType = {
+      id: ALL_WORKFLOWS_FOLDER_ID,
+      name: ALL_WORKFLOWS_FOLDER_NAME,
+      description: ALL_WORKFLOWS_FOLDER_DESCRIPTION,
+      parent_id: null,
+      flows: [],
+      components: [],
+      readonly: true,
+      is_global_folder: true,
+    };
+    const folders = [
+      ...data,
+      sharedFolder,
+      ...(userData?.can_view_all_flows ? [allWorkflowsFolder] : []),
+    ];
     setMyCollectionId(myCollectionId ?? "");
     setFolders(folders);
 
     return folders;
   };
 
-  const queryResult = query(["useGetFolders"], getFoldersFn, {
+  const queryResult = query(["useGetFolders", !!userData?.can_view_all_flows], getFoldersFn, {
     ...options,
     enabled: isAuthenticated && (options?.enabled ?? true),
   });

@@ -31,6 +31,7 @@ from langflow.services.database.models.flow.model import (
     FlowUpdate,
 )
 from langflow.services.database.models.flow_share.model import (
+    ALL_WORKFLOWS_FOLDER_ID,
     SHARED_WITH_ME_FOLDER_ID,
     FlowAccessLevel,
     FlowShare,
@@ -355,6 +356,16 @@ async def _read_flow(
     return (await session.exec(stmt)).first()
 
 
+async def _user_can_view_all_flows(
+    session: AsyncSession,
+    user_id: UUID,
+) -> bool:
+    from langflow.services.database.models.user.model import User
+
+    stmt = select(User.can_view_all_flows).where(User.id == user_id)
+    return bool((await session.exec(stmt)).first())
+
+
 async def _read_flow_with_access(
     session: AsyncSession,
     flow_id: UUID,
@@ -375,16 +386,31 @@ async def _read_flow_with_access(
         .where(FlowShare.status == FlowShareStatus.ACCEPTED)
     )
     shared_flow = (await session.exec(stmt)).first()
-    if not shared_flow:
+    if shared_flow:
+        flow, share, owner_username = shared_flow
+        permission = (
+            FlowAccessLevel.EDIT
+            if share.permission == FlowSharePermission.EDIT
+            else FlowAccessLevel.READ
+        )
+        return flow, permission, share, owner_username
+
+    if not await _user_can_view_all_flows(session, user_id):
         return None, None, None, None
 
-    flow, share, owner_username = shared_flow
-    permission = (
-        FlowAccessLevel.EDIT
-        if share.permission == FlowSharePermission.EDIT
-        else FlowAccessLevel.READ
+    stmt = (
+        select(Flow, User.username)
+        .join(User, User.id == Flow.user_id)
+        .where(Flow.id == flow_id)
+        .where(Flow.user_id.is_not(None))
+        .where(Flow.user_id != user_id)
     )
-    return flow, permission, share, owner_username
+    globally_visible_flow = (await session.exec(stmt)).first()
+    if not globally_visible_flow:
+        return None, None, None, None
+
+    flow, owner_username = globally_visible_flow
+    return flow, FlowAccessLevel.GLOBAL_READ, None, owner_username
 
 
 async def _read_shared_flows(
@@ -419,6 +445,55 @@ async def _read_shared_flows(
     return list((await session.exec(stmt)).all())
 
 
+async def _read_globally_visible_flows(
+    session: AsyncSession,
+    user_id: UUID,
+    *,
+    components_only: bool | None = None,
+    search: str | None = None,
+) -> list[tuple[Flow, str]]:
+    """Read non-owned flows available through the global workflow visibility flag."""
+    if not await _user_can_view_all_flows(session, user_id):
+        return []
+
+    from langflow.services.database.models.user.model import User
+
+    accepted_share_flow_ids = set(
+        (
+            await session.exec(
+                select(FlowShare.flow_id)
+                .where(FlowShare.recipient_user_id == user_id)
+                .where(FlowShare.status == FlowShareStatus.ACCEPTED)
+            )
+        ).all()
+    )
+
+    stmt = (
+        select(Flow, User.username)
+        .join(User, User.id == Flow.user_id)
+        .where(Flow.user_id.is_not(None))
+        .where(Flow.user_id != user_id)
+    )
+
+    if components_only is True:
+        stmt = stmt.where(Flow.is_component == True)  # noqa: E712
+    elif components_only is False:
+        stmt = stmt.where(Flow.is_component == False)  # noqa: E712
+
+    if search:
+        stmt = stmt.where(Flow.name.ilike(f"%{search}%"))  # type: ignore[attr-defined]
+
+    if Flow.updated_at is not None:
+        stmt = stmt.order_by(Flow.updated_at.desc())  # type: ignore[attr-defined]
+
+    visible_flows = list((await session.exec(stmt)).all())
+    return [
+        (flow, owner_username)
+        for flow, owner_username in visible_flows
+        if flow.id not in accepted_share_flow_ids
+    ]
+
+
 def _serialize_flow(
     flow: Flow,
     *,
@@ -429,9 +504,13 @@ def _serialize_flow(
     payload["current_user_permission"] = permission
     payload["shared_by_username"] = shared_by_username
     payload["viewer_folder_id"] = (
-        SHARED_WITH_ME_FOLDER_ID
-        if permission != FlowAccessLevel.OWNER
-        else (str(flow.folder_id) if flow.folder_id else None)
+        ALL_WORKFLOWS_FOLDER_ID
+        if permission == FlowAccessLevel.GLOBAL_READ
+        else (
+            SHARED_WITH_ME_FOLDER_ID
+            if permission != FlowAccessLevel.OWNER
+            else (str(flow.folder_id) if flow.folder_id else None)
+        )
     )
     return FlowRead.model_validate(payload)
 
@@ -446,9 +525,13 @@ def _serialize_flow_header(
     payload["current_user_permission"] = permission
     payload["shared_by_username"] = shared_by_username
     payload["viewer_folder_id"] = (
-        SHARED_WITH_ME_FOLDER_ID
-        if permission != FlowAccessLevel.OWNER
-        else (str(flow.folder_id) if flow.folder_id else None)
+        ALL_WORKFLOWS_FOLDER_ID
+        if permission == FlowAccessLevel.GLOBAL_READ
+        else (
+            SHARED_WITH_ME_FOLDER_ID
+            if permission != FlowAccessLevel.OWNER
+            else (str(flow.folder_id) if flow.folder_id else None)
+        )
     )
     return FlowHeader.model_validate(payload)
 

@@ -39,7 +39,6 @@ from langflow.initial_setup.setup import (
 )
 from langflow.middleware import ContentSizeLimitMiddleware
 from langflow.plugin_routes import load_plugin_routes
-from langflow.services.auth.twc import maybe_build_twc_login_response
 from langflow.services.deps import (
     get_queue_service,
     get_service,
@@ -68,8 +67,28 @@ _tasks: list[asyncio.Task] = []
 MAX_PORT = 65535
 
 
+def _langpatcher_local_only() -> bool:
+    return os.getenv("LANGPATCHER_LOCAL_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+class _LangPatcherNoOpTelemetryService:
+    def start(self) -> None:
+        return None
+
+    async def log_exception(self, *_args, **_kwargs) -> None:
+        return None
+
+    def __getattr__(self, _name: str):
+        async def _async_noop(*_args, **_kwargs):
+            return None
+
+        return _async_noop
+
+
 async def log_exception_to_telemetry(exc: Exception, context: str) -> None:
     """Helper to safely log exceptions to telemetry without raising."""
+    if _langpatcher_local_only():
+        return
     try:
         telemetry_service = get_telemetry_service()
         await telemetry_service.log_exception(exc, context)
@@ -147,7 +166,7 @@ def warn_about_future_cors_changes(settings):
 
 def get_lifespan(*, fix_migration=False, version=None):
     initialize_settings_service()
-    telemetry_service = get_telemetry_service()
+    telemetry_service = _LangPatcherNoOpTelemetryService() if _langpatcher_local_only() else get_telemetry_service()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -496,13 +515,6 @@ def create_app():
         return await call_next(request)
 
     @app.middleware("http")
-    async def twc_auto_login(request: Request, call_next):
-        auto_login_response = maybe_build_twc_login_response(request)
-        if auto_login_response is not None:
-            return auto_login_response
-        return await call_next(request)
-
-    @app.middleware("http")
     async def apply_https_security_headers(request: Request, call_next):
         response = await call_next(request)
         settings_service = get_settings_service()
@@ -549,6 +561,34 @@ def create_app():
     # Discover and register additional routers from plugins (langflow.plugins entry-point)
     load_plugin_routes(app)
 
+    # Langflow 1.10 login checks app.state.limiter directly.
+    from slowapi.errors import RateLimitExceeded
+
+    @app.exception_handler(RateLimitExceeded)
+    async def rate_limit_exception_handler(request: Request, _exc: RateLimitExceeded):
+        """Handle rate limit exceeded errors with structured logging."""
+        from langflow.services.rate_limit.service import get_limiter_key
+
+        retry_after_seconds = "60"
+        client_ip = get_limiter_key(request)
+        logger.warning(
+            "Rate limit exceeded",
+            auth_event="rate_limit_exceeded",
+            client_ip=client_ip,
+            path=request.url.path,
+            method=request.method,
+        )
+        return JSONResponse(
+            status_code=HTTPStatus.TOO_MANY_REQUESTS,
+            content={
+                "detail": "Too many requests. Please try again later.",
+                "retry_after": retry_after_seconds,
+            },
+            headers={
+                "Retry-After": retry_after_seconds,
+            },
+        )
+
     @app.exception_handler(Exception)
     async def exception_handler(_request: Request, exc: Exception):
         if isinstance(exc, HTTPException):
@@ -566,9 +606,16 @@ def create_app():
             content={"message": str(exc)},
         )
 
-    FastAPIInstrumentor.instrument_app(app)
+    if os.getenv("LANGPATCHER_LOCAL_ONLY", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        FastAPIInstrumentor.instrument_app(app)
+    else:
+        logger.debug("Skipping FastAPI OpenTelemetry instrumentation in LangPatcher local-only mode")
 
     add_pagination(app)
+
+    from langflow.services.rate_limit import get_rate_limiter
+
+    app.state.limiter = get_rate_limiter()
 
     return app
 

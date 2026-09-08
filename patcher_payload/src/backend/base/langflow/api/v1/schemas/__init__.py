@@ -399,7 +399,7 @@ class PublicConfigResponse(BaseConfigResponse):
     allow_custom_components: bool
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> "PublicConfigResponse":
+    def from_settings(cls, settings: Settings, auth_settings=None) -> "PublicConfigResponse":
         """Create a PublicConfigResponse instance using values from a Settings object.
 
         Parameters:

@@ -38,8 +38,6 @@ import type {
 import { buildFlowVerticesWithFallback } from "../utils/buildUtils";
 import {
   buildPositionDictionary,
-  checkChatInput,
-  checkWebhookInput,
   cleanEdges,
   getConnectedSubgraph,
   getHandleId,
@@ -51,12 +49,15 @@ import {
   validateEdge,
   validateNodes,
 } from "../utils/reactflowUtils";
+import {
+  type ConstraintViolation,
+  filterPlaceableSelection,
+} from "../utils/componentConstraints";
 import { getInputsAndOutputs } from "../utils/storeUtils";
 import useAlertStore from "./alertStore";
 import { useDarkStore } from "./darkStore";
 import useFlowsManagerStore from "./flowsManagerStore";
 import { useGlobalVariablesStore } from "./globalVariablesStore/globalVariables";
-import { filterSingletonComponent } from "./helpers/filter-singleton-component";
 import { useTweaksStore } from "./tweaksStore";
 import { useTypesStore } from "./typesStore";
 import { useUtilityStore } from "./utilityStore";
@@ -110,6 +111,14 @@ export async function waitForNodeUpdates(
         `${pendingNodeUpdates.size} updates still pending: ${pendingIds.join(", ")}`,
     );
   }
+}
+
+function getConstraintViolationMessage(violation: ConstraintViolation): string {
+  if (violation.reason === "singleton") {
+    return `You can only have one ${violation.type} component in a flow.`;
+  }
+
+  return `${violation.type} cannot be used with ${violation.conflictingType} in the same flow.`;
 }
 
 // this is our useStore hook that we can use in our components to get parts of the store and call actions
@@ -544,19 +553,21 @@ const useFlowStore = create<FlowStoreType>((set, get) => ({
       selection.edges = selection.edges.concat(existingEdgesToCopy);
     }
 
-    filterSingletonComponent(
-      selection,
-      "ChatInput",
-      checkChatInput(get().nodes),
-      "You can only have one Chat Input component in a flow.",
-    );
+    const filteredSelection = filterPlaceableSelection(selection, get().nodes);
+    selection.nodes = filteredSelection.nodes;
+    selection.edges = filteredSelection.edges;
 
-    filterSingletonComponent(
-      selection,
-      "Webhook",
-      checkWebhookInput(get().nodes),
-      "You can only have one Webhook component in a flow.",
-    );
+    if (filteredSelection.violations.length > 0) {
+      const messages = [
+        ...new Set(
+          filteredSelection.violations.map(getConstraintViolationMessage),
+        ),
+      ];
+      useAlertStore.getState().setErrorData({
+        title: "Some pasted components could not be added.",
+        list: messages,
+      });
+    }
 
     let minimumX = Infinity;
     let minimumY = Infinity;
@@ -1330,6 +1341,17 @@ export function recomputeComponentsToUpdateIfNeeded(): void {
   if (nodes.length > 0) {
     updateComponentsToUpdate(nodes);
   }
+}
+
+export function syncNodeTranslations(): void {
+  // The patched frontend expects this export to exist after type refreshes.
+  // Keep it side-effect free here until the broader translation sync logic is
+  // restored in this patch set.
+}
+
+export function syncNoteTranslations(): void {
+  // See syncNodeTranslations: keep this available for callers in the patched
+  // tree without changing note state during the bundle rebuild.
 }
 
 export default useFlowStore;

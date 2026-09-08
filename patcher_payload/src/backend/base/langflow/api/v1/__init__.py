@@ -19,8 +19,6 @@ from langflow.api.v1.sso import router as sso_router
 from langflow.api.v1.starter_projects import router as starter_projects_router
 from langflow.api.v1.store import router as store_router
 from langflow.api.v1.traces import router as traces_router
-from langflow.api.v1.twc_auth import compat_router as twc_auth_compat_router
-from langflow.api.v1.twc_auth import router as twc_auth_router
 from langflow.api.v1.users import router as users_router
 from langflow.api.v1.validate import router as validate_router
 from langflow.api.v1.variable import router as variables_router
@@ -48,8 +46,6 @@ __all__ = [
     "starter_projects_router",
     "store_router",
     "traces_router",
-    "twc_auth_compat_router",
-    "twc_auth_router",
     "users_router",
     "validate_router",
     "variables_router",

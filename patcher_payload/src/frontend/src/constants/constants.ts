@@ -10,6 +10,7 @@ import type { languageMap } from "../types/components";
 export const DEFAULT_SESSION_NAME = "Default Session";
 export const NEW_SESSION_NAME = "New Session";
 export const SLIDING_TRANSITION_MS = 300;
+export const BUILD_PANEL_COLLISION_PADDING_PX = 16;
 
 const getEnvVar = <T = string | undefined>(
   key: string,
@@ -653,6 +654,7 @@ export const CONTROL_NEW_USER = {
   password: "",
   is_active: false,
   is_superuser: false,
+  can_view_all_flows: false,
 };
 
 export const tabsCode = [];

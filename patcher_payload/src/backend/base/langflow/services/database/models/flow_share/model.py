@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from langflow.services.database.models.flow.model import Flow
 
 SHARED_WITH_ME_FOLDER_ID = "__shared_with_me__"
+ALL_WORKFLOWS_FOLDER_ID = "__all_workflows__"
 
 
 class FlowSharePermission(str, Enum):
@@ -30,6 +31,7 @@ class FlowAccessLevel(str, Enum):
     OWNER = "owner"
     READ = "read"
     EDIT = "edit"
+    GLOBAL_READ = "global_read"
 
 
 class FlowShare(SQLModel, table=True):  # type: ignore[call-arg]

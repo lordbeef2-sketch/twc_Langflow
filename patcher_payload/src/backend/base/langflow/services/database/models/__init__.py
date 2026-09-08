@@ -8,6 +8,7 @@ from .flow_share import FlowShare
 from .flow_version import FlowVersion
 from .flow_version_deployment_attachment import FlowVersionDeploymentAttachment
 from .folder import Folder
+from .ingestion_run import IngestionRun, IngestionRunStatus
 from .jobs import Job
 from .message import MessageTable
 from .traces.model import SpanTable, TraceTable
@@ -25,6 +26,8 @@ __all__ = [
     "FlowVersion",
     "FlowVersionDeploymentAttachment",
     "Folder",
+    "IngestionRun",
+    "IngestionRunStatus",
     "Job",
     "MessageTable",
     "SSOConfig",
