@@ -4,6 +4,10 @@ This package keeps Langflow's native users, permissions, and flow/project
 sharing. It adds one GUI-managed authentication lane for Teamwork Cloud:
 OpenID Connect (OIDC).
 
+The installer also keeps databases created by the retired v4 overlay readable:
+its legacy compatibility columns are ignored by the current migration check, so
+an existing database does not need to be reset or manually edited.
+
 ## Configure it in the GUI
 
 1. Launch Langflow and sign in as the local administrator.

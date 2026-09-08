@@ -781,6 +781,69 @@ os.environ.setdefault("DO_NOT_TRACK", "true")
   Ok "Installed Python startup guard for Windows OpenSSL DLL safety"
 }
 
+function Patch-StockAlembicLegacyColumns([string]$LangflowRoot) {
+  $envPath = Join-Path $LangflowRoot "alembic\env.py"
+  Assert-PathWithinRoot -path $envPath -root $LangflowRoot
+  if (-not (Test-Path -LiteralPath $envPath)) {
+    Warn "Unable to install legacy database compatibility guard; Alembic env.py was not found."
+    return
+  }
+
+  $content = Get-Content -LiteralPath $envPath -Raw
+  if ($content -match 'TWC_LEGACY_COLUMNS') {
+    Ok "Legacy v4 database compatibility guard is already installed"
+    return
+  }
+
+  $marker = "def include_name(name: str | None, type_: str, parent_names: dict[str, str | None]) -> bool:`n"
+  if (-not $content.Contains($marker)) {
+    Warn "Unable to install legacy database compatibility guard; Alembic include_name marker was not found."
+    return
+  }
+
+  $compatibility = @'
+_TWC_LEGACY_COLUMNS = {
+    ("user", "can_view_all_flows"),
+    ("sso_config", "provider"),
+    ("sso_config", "provider_name"),
+    ("sso_config", "enforce_sso"),
+    ("sso_config", "client_id"),
+    ("sso_config", "discovery_url"),
+    ("sso_config", "redirect_uri"),
+    ("sso_config", "scopes"),
+    ("sso_config", "token_endpoint"),
+    ("sso_config", "authorization_endpoint"),
+    ("sso_config", "jwks_uri"),
+    ("sso_config", "issuer"),
+}
+
+
+def include_object(object_, name: str | None, type_: str, reflected: bool, compare_to) -> bool:
+    """Keep databases created by the retired v4 overlay readable.
+
+    Those installs retained compatibility columns while the current native
+    Langflow models no longer expose them.  They are harmless legacy storage;
+    treating them as migration drift would abort startup before the GUI can be
+    used.  This filter applies only to reflected legacy columns and does not
+    suppress changes to current Langflow tables.
+    """
+    if type_ == "column" and reflected and name:
+        table = getattr(getattr(object_, "table", None), "name", None)
+        if (table, name) in _TWC_LEGACY_COLUMNS:
+            return False
+    return True
+
+
+'@
+  $content = $content.Replace($marker, $compatibility + $marker)
+  $content = $content.Replace(
+    '"include_name": include_name,',
+    "`"include_name`": include_name,`r`n        `"include_object`": include_object,"
+  )
+  Set-Content -LiteralPath $envPath -Value $content -Encoding UTF8
+  Ok "Installed legacy v4 database compatibility guard"
+}
+
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ConfigRoot = $ScriptRoot
 $SavedConfig = Load-PatcherConfig -Root $ConfigRoot
@@ -868,6 +931,7 @@ $backendCopied = Copy-Tree -sourceRoot $BackendPayloadRoot -destinationRoot $Lan
 Ok "Copied $backendCopied backend files"
 Patch-StockRouterForTWCOpenId -langflowRoot $LangflowRoot
 Patch-StockLoginForTWCOpenId -langflowRoot $LangflowRoot
+Patch-StockAlembicLegacyColumns -LangflowRoot $LangflowRoot
 Patch-LangflowCliLocalOnlyVersionCheck -LangflowRoot $LangflowRoot
 if (-not $SkipAuthAddition) {
   Patch-LangflowLoginLocalOnlyVariableInit -LangflowRoot $LangflowRoot
