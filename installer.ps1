@@ -848,9 +848,9 @@ if ($SkipAuthAddition) {
   Ok "Installed $frontendFiles frontend files"
 }
 
-Info "Ensuring LANGFLOW_AUTO_LOGIN=false in $EnvFile"
-Ensure-EnvSetting -envFile $EnvFile -key "LANGFLOW_AUTO_LOGIN" -value "false"
-Ok "Configured .env with LANGFLOW_AUTO_LOGIN=false"
+Info "Ensuring Langflow's default local auto-login mode in $EnvFile"
+Ensure-EnvSetting -envFile $EnvFile -key "LANGFLOW_AUTO_LOGIN" -value "true"
+Ok "Configured .env with LANGFLOW_AUTO_LOGIN=true"
 
 Info "Ensuring LANGPATCHER_LOCAL_ONLY=true in $EnvFile"
 Ensure-EnvSetting -envFile $EnvFile -key "LANGPATCHER_LOCAL_ONLY" -value "true"

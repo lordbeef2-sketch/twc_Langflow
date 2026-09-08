@@ -5,14 +5,15 @@ knowledge-base, ingestion, component, and Windows runtime patches.
 
 The package does **not** add a custom Teamwork Cloud authentication layer.
 Langflow's stock authentication and authorization remain the source of truth.
-Configure the normal Langflow credentials for the first run:
+The packaged local install keeps Langflow's default auto-login mode, so it does
+not require a username or password on first launch:
 
 ```env
-LANGFLOW_SUPERUSER=admin
-LANGFLOW_SUPERUSER_PASSWORD=choose-a-password
-LANGFLOW_AUTO_LOGIN=false
+LANGFLOW_AUTO_LOGIN=true
 ```
 
+For a deliberately protected multi-user deployment, set
+`LANGFLOW_AUTO_LOGIN=false` and configure Langflow's own superuser credentials.
 Do not add TWC OAuth, OpenID, SAML, callback, or TWC preset-server variables to
 this package. They are not consumed by the installed Langflow runtime.
 
