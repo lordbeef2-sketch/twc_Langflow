@@ -10,7 +10,7 @@ from __future__ import annotations
 import secrets
 from datetime import timedelta
 from typing import Annotated, Any
-from urllib.parse import urlencode, urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 import jwt
@@ -55,7 +55,10 @@ class TWCSSOConfigRequest(BaseModel):
     client_secret: SecretStr | None = Field(default=None, repr=False)
     discovery_url: str | None = None
     redirect_uri: str | None = None
-    scopes: str = "openid email profile"
+    # TWC Refresh3 advertises the narrow OpenID scope.  Keep this aligned with
+    # the Workbench AuthServer defaults instead of asking TWC for generic IdP
+    # profile scopes that it does not need for live authorization.
+    scopes: str = "openid"
     token_endpoint: str | None = None
     authorization_endpoint: str | None = None
     jwks_uri: str | None = None
@@ -84,7 +87,7 @@ def _config_response(config: SSOConfig) -> dict[str, Any]:
         "client_id": settings.client_id,
         "discovery_url": settings.discovery_url,
         "redirect_uri": settings.redirect_uri,
-        "scopes": settings.scopes,
+        "scopes": "openid",
         "token_endpoint": settings.token_endpoint,
         "authorization_endpoint": settings.authorization_endpoint,
         "jwks_uri": settings.jwks_uri,
@@ -119,7 +122,11 @@ async def _oidc_metadata(config: SSOConfig) -> dict[str, Any]:
     settings = config.provider_settings
     if settings.discovery_url:
         try:
-            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            # Workbench's TWC server profiles expose the same TLS-relaxed
+            # switch used for enterprise AuthServer deployments.  Langflow's
+            # GUI has no second certificate store, so use the same relaxed
+            # transport for this TWC-only lane.
+            async with httpx.AsyncClient(timeout=20, verify=False, follow_redirects=True) as client:
                 response = await client.get(settings.discovery_url)
                 response.raise_for_status()
                 metadata = response.json()
@@ -134,6 +141,7 @@ async def _oidc_metadata(config: SSOConfig) -> dict[str, Any]:
         "jwks_uri": settings.jwks_uri or metadata.get("jwks_uri"),
         "issuer": settings.issuer or metadata.get("issuer"),
         "userinfo_endpoint": metadata.get("userinfo_endpoint"),
+        "token_endpoint_auth_methods_supported": metadata.get("token_endpoint_auth_methods_supported", ["client_secret_basic"]),
     }
 
 
@@ -166,6 +174,62 @@ def _claims_from_id_token(token: str, metadata: dict[str, Any], client_id: str, 
     if not claims.get("sub"):
         raise HTTPException(status_code=400, detail="TWC OpenID response has no subject")
     return claims
+
+
+def _twc_current_user_endpoint(metadata: dict[str, Any]) -> str:
+    """Build the same live TWC identity endpoint used by Workbench."""
+    source = metadata.get("issuer") or metadata.get("authorization_endpoint") or metadata.get("token_endpoint")
+    if not source:
+        raise HTTPException(status_code=502, detail="TWC OpenID metadata has no Teamwork Cloud host")
+    parsed = urlparse(str(source))
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=502, detail="TWC OpenID metadata has an invalid Teamwork Cloud host")
+    return urlunparse((parsed.scheme, parsed.netloc, "/osmc/admin/currentUser", "", "permission=true", ""))
+
+
+def _current_user_claims(payload: Any) -> dict[str, Any]:
+    """Normalize TWC's currentUser envelope into Langflow identity claims."""
+    candidates: list[dict[str, Any]] = []
+    if isinstance(payload, dict):
+        candidates.append(payload)
+        for key in ("user", "data", "item"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                candidates.append(value)
+    elif isinstance(payload, list):
+        candidates.extend(value for value in payload if isinstance(value, dict))
+    for candidate in candidates:
+        username = (
+            candidate.get("preferred_username")
+            or candidate.get("username")
+            or candidate.get("userName")
+            or candidate.get("login")
+            or candidate.get("name")
+            or candidate.get("email")
+        )
+        subject = candidate.get("sub") or candidate.get("id") or candidate.get("userId") or username
+        if username and subject:
+            claims = dict(candidate)
+            claims.setdefault("sub", str(subject))
+            claims.setdefault("preferred_username", str(username))
+            if candidate.get("email"):
+                claims.setdefault("email", candidate["email"])
+            if candidate.get("name"):
+                claims.setdefault("name", candidate["name"])
+            return claims
+    raise HTTPException(status_code=502, detail="TWC currentUser did not return an authenticated user")
+
+
+async def _claims_from_twc_token(token: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the authenticated TWC user live, as Workbench does."""
+    endpoint = _twc_current_user_endpoint(metadata)
+    try:
+        async with httpx.AsyncClient(timeout=20, verify=False, follow_redirects=True) as client:
+            response = await client.get(endpoint, headers={"Authorization": f"Token {token}", "Accept": "application/json"})
+            response.raise_for_status()
+            return _current_user_claims(response.json())
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="Unable to resolve the authenticated TWC user from /osmc/admin/currentUser") from exc
 
 
 async def _materialize_user(config: SSOConfig, claims: dict[str, Any], db: DbSession) -> User:
@@ -222,7 +286,7 @@ async def put_sso_config(
     provider_settings = OIDCProviderSettings(
         discovery_url=payload.discovery_url or None,
         redirect_uri=payload.redirect_uri or None,
-        scopes=payload.scopes or "openid email profile",
+        scopes="openid",
         token_endpoint=payload.token_endpoint or None,
         authorization_endpoint=payload.authorization_endpoint or None,
         jwks_uri=payload.jwks_uri or None,
@@ -309,7 +373,7 @@ async def start_sso(
         raise HTTPException(status_code=400, detail="TWC OpenID configuration is incomplete")
     state = secrets.token_urlsafe(32)
     nonce = secrets.token_urlsafe(32)
-    scope = config.provider_settings.scopes or "openid email profile"
+    scope = "openid"
     params = {
         "response_type": "code",
         "client_id": client_id,
@@ -351,21 +415,32 @@ async def sso_callback(
     from langflow.services.database.models.auth.sso_secret import decrypt_sso_client_secret
 
     client_secret = decrypt_sso_client_secret(config.client_secret_encrypted, get_settings_service())
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=20, verify=False, follow_redirects=True) as client:
         token_response = await client.post(token_endpoint, data={
             "grant_type": "authorization_code",
             "code": code,
             "client_id": client_id,
-            "client_secret": client_secret,
             "redirect_uri": redirect_uri,
-        })
+            "scope": "openid",
+        }, auth=httpx.BasicAuth(client_id, client_secret))
     if token_response.is_error:
         raise HTTPException(status_code=502, detail="TWC OpenID token exchange failed")
     token_data = token_response.json()
+    access_token = token_data.get("access_token")
     id_token = token_data.get("id_token")
-    if not id_token:
-        raise HTTPException(status_code=502, detail="TWC OpenID did not return an ID token")
-    claims = _claims_from_id_token(id_token, metadata, client_id, nonce)
+    if not isinstance(access_token, str) and not isinstance(id_token, str):
+        raise HTTPException(status_code=502, detail="TWC OpenID did not return an access token or ID token")
+    # Match Workbench's TokenBundle behavior: TWC's ID token is the primary
+    # upstream token when both fields are returned; the access token is the
+    # fallback.  The live currentUser call remains the authorization check.
+    twc_token = id_token if isinstance(id_token, str) and id_token.strip() else access_token
+    if isinstance(twc_token, str) and twc_token.strip():
+        # This is the Workbench path: TWC remains the live identity and
+        # authorization authority after the code exchange.  Do not silently
+        # turn a failed currentUser check into a local JWT-only login.
+        claims = await _claims_from_twc_token(twc_token, metadata)
+    else:
+        raise HTTPException(status_code=502, detail="TWC OpenID did not return a usable upstream token")
     user = await _materialize_user(config, claims, db)
     tokens = await get_auth_service().create_user_tokens(user.id, db, update_last_login=True)
     redirect = RedirectResponse(url=_safe_next(request.cookies.get(_NEXT_COOKIE)), status_code=303)

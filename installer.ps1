@@ -333,9 +333,18 @@ function Get-PythonVersion([string]$PythonPath) {
 function Ensure-CompatibleRuntimePackages([string]$PythonPath) {
   $uvPath = Resolve-UvCommand
   Info "Ensuring Windows-compatible aiohttp runtime"
-  & $uvPath --native-tls pip install --python $PythonPath "aiohttp==3.9.5"
+  & $uvPath --native-tls pip install --python $PythonPath "aiohttp>=3.11,<4"
   if ($LASTEXITCODE -ne 0) {
     Fail "Failed to install Windows-compatible aiohttp runtime package."
+  }
+
+  $requirementsPath = Join-Path $ScriptRoot "requirements.txt"
+  if (Test-Path -LiteralPath $requirementsPath) {
+    Info "Installing packages listed in $requirementsPath"
+    & $uvPath --native-tls pip install --python $PythonPath --requirement $requirementsPath
+    if ($LASTEXITCODE -ne 0) {
+      Fail "Failed to install packages listed in $requirementsPath."
+    }
   }
 }
 
@@ -464,18 +473,38 @@ function Patch-StockLoginForTWCOpenId([string]$langflowRoot) {
   Assert-PathWithinRoot -path $loginPath -root $langflowRoot
   if (-not (Test-Path -LiteralPath $loginPath)) { Fail "Missing stock Langflow login router: $loginPath" }
   $content = Get-Content -LiteralPath $loginPath -Raw
-  if ($content -notmatch 'is_sso_enabled') {
-    $content = $content.Replace(
+  $changed = $false
+  $desiredGuard = '    if auth_settings.AUTO_LOGIN and (_langpatcher_local_only() or not await _twc_sso_enabled(db)):'
+  foreach ($oldGuard in @(
       '    if auth_settings.AUTO_LOGIN:',
       '    if auth_settings.AUTO_LOGIN and not await _twc_sso_enabled(db):'
-    )
+    )) {
+    if ($content.Contains($oldGuard) -and -not $content.Contains($desiredGuard)) {
+      $content = $content.Replace($oldGuard, $desiredGuard)
+      $changed = $true
+    }
+  }
+  if ($content -notmatch '(?m)^import os$') {
+    $content = [regex]::Replace($content, 'from __future__ import annotations\r?\n', { param($match) $match.Groups[0].Value + 'import os' + "`r`n" }, 1)
+    $changed = $true
+  }
+  if ($content -notmatch 'from langflow\.api\.v1\.sso import is_sso_enabled') {
     $content = $content.Replace(
       'from langflow.services.auth.exceptions import AuthenticationError',
       "from langflow.api.v1.sso import is_sso_enabled as _twc_sso_enabled`r`nfrom langflow.services.auth.exceptions import AuthenticationError"
     )
+    $changed = $true
+  }
+  if ($content -notmatch 'def _langpatcher_local_only\(\)') {
+    $helperBlock = 'def _langpatcher_local_only() -> bool:' + "`r`n" + '    return os.getenv("LANGPATCHER_LOCAL_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}' + "`r`n`r`n"
+    $headerPattern = 'router = APIRouter\(tags=\["Login"\]\)\r?\n'
+    $content = [regex]::Replace($content, $headerPattern, { param($match) $match.Groups[0].Value + $helperBlock }, 1)
+    $changed = $true
+  }
+  if ($changed) {
     Set-Content -LiteralPath $loginPath -Value $content -Encoding UTF8
   }
-  Ok "Guarded stock auto-login when TWC OpenID is enabled"
+  Ok "Guarded stock auto-login while preserving the local-only admin recovery path"
 }
 
 function Install-TwcOpenIdUi([string]$payloadRoot, [string]$frontendRoot) {
