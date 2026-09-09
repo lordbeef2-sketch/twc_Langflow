@@ -166,8 +166,19 @@
   function addLoginButton() {
     if (!/\/login(?:\/|$)/.test(window.location.pathname)) return;
     if (document.getElementById("twc-openid-login")) return;
-    var form = document.querySelector("form");
-    if (!form) return;
+    // Langflow's login markup changed: recent builds render the controls
+    // without a native <form>. Anchor to the submit/password control instead
+    // of silently dropping the TWC button when that wrapper is absent.
+    var anchor = document.querySelector("form");
+    if (!anchor) {
+      var submit = document.querySelector('button[type="submit"]');
+      anchor = submit && (submit.parentElement || submit);
+    }
+    if (!anchor) {
+      var password = document.querySelector('input[type="password"]');
+      anchor = password && (password.parentElement || password);
+    }
+    if (!anchor) return;
     var button = document.createElement("button");
     button.id = "twc-openid-login";
     button.type = "button";
@@ -176,7 +187,7 @@
       var next = window.location.pathname + window.location.search;
       window.location.assign("/api/v1/sso/start/twc-openid?next=" + encodeURIComponent(next));
     });
-    form.appendChild(button);
+    anchor.appendChild(button);
   }
 
   function boot() {
