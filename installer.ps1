@@ -489,7 +489,35 @@ function Install-TwcOpenIdUi([string]$payloadRoot, [string]$frontendRoot) {
     $index = $index.Replace('</head>', "    <script src=`"./twc-openid-ui.js`"></script>`r`n  </head>")
     Set-Content -LiteralPath $indexPath -Value $index -Encoding UTF8
   }
+  Patch-FrontendAdminSettingsGuard -frontendRoot $frontendRoot
   Ok "Installed GUI-only TWC OpenID sign-in control"
+}
+
+function Patch-FrontendAdminSettingsGuard([string]$frontendRoot) {
+  # Langflow's stock wrapper treats AUTO_LOGIN as a reason to redirect every
+  # settings route, even after the auto-login session has resolved to the
+  # superuser. The backend still enforces get_current_active_superuser for
+  # settings APIs; the UI guard only needs the authenticated user's admin flag.
+  $old = 'const NG=({children:e})=>{const{userData:t}=I.useContext(AE),r=wl(l=>l.isAuthenticated),o=wl(l=>l.autoLogin),s=wl(l=>l.isAdmin);return r?t&&!s||o?v.jsx(F6,{to:"/",replace:!0}):e:v.jsx(Tmt,{})}'
+  $new = 'const NG=({children:e})=>{const{userData:t}=I.useContext(AE),r=wl(l=>l.isAuthenticated),s=wl(l=>l.isAdmin);return r?t&&!s?v.jsx(F6,{to:"/",replace:!0}):e:v.jsx(Tmt,{})}'
+  $assets = Get-ChildItem -LiteralPath (Join-Path $frontendRoot "assets") -Filter "index-*.js" -File
+  if ($assets.Count -eq 0) { Fail "Missing Langflow frontend JavaScript bundle" }
+  $patched = $false
+  foreach ($asset in $assets) {
+    $content = Get-Content -LiteralPath $asset.FullName -Raw
+    if ($content.Contains($old)) {
+      $content = $content.Replace($old, $new)
+      Set-Content -LiteralPath $asset.FullName -Value $content -Encoding UTF8
+      $patched = $true
+      break
+    }
+    if ($content.Contains($new)) { $patched = $true; break }
+  }
+  if ($patched) {
+    Ok "Allowed authenticated superusers to open bundled settings routes"
+  } else {
+    Fail "The bundled Langflow settings guard did not match the expected build"
+  }
 }
 
 function Copy-Tree([string]$sourceRoot, [string]$destinationRoot, [switch]$SkipAuthOverlay) {
