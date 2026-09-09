@@ -474,7 +474,7 @@ function Patch-StockLoginForTWCOpenId([string]$langflowRoot) {
   if (-not (Test-Path -LiteralPath $loginPath)) { Fail "Missing stock Langflow login router: $loginPath" }
   $content = Get-Content -LiteralPath $loginPath -Raw
   $changed = $false
-  $desiredGuard = '    if auth_settings.AUTO_LOGIN and (_langpatcher_local_only() or not await _twc_sso_enabled(db)):'
+  $desiredGuard = '    if auth_settings.AUTO_LOGIN and not await _twc_sso_enabled(db):'
   foreach ($oldGuard in @(
       '    if auth_settings.AUTO_LOGIN:',
       '    if auth_settings.AUTO_LOGIN and not await _twc_sso_enabled(db):'
@@ -504,19 +504,19 @@ function Patch-StockLoginForTWCOpenId([string]$langflowRoot) {
   if ($changed) {
     Set-Content -LiteralPath $loginPath -Value $content -Encoding UTF8
   }
-  Ok "Guarded stock auto-login while preserving the local-only admin recovery path"
+  Ok "Guarded stock auto-login when TWC OpenID is not enabled"
 }
 
 function Install-TwcOpenIdUi([string]$payloadRoot, [string]$frontendRoot) {
   $uiSource = Join-Path $payloadRoot "twc-openid-ui.js"
-  $uiTarget = Join-Path $frontendRoot "twc-openid-ui.js"
+  $uiTarget = Join-Path $frontendRoot "twc-openid-ui-v3.js"
   if (-not (Test-Path -LiteralPath $uiSource)) { Fail "Missing TWC OpenID UI asset: $uiSource" }
   Copy-Item -LiteralPath $uiSource -Destination $uiTarget -Force
   $indexPath = Join-Path $frontendRoot "index.html"
   $index = Get-Content -LiteralPath $indexPath -Raw
-  $scriptTag = '    <script src="./twc-openid-ui.js?v=2"></script>'
-  if ($index -match 'twc-openid-ui\.js') {
-    $index = [regex]::Replace($index, '\s*<script src="\.\/twc-openid-ui\.js(?:\?v=\d+)?"></script>', "`r`n$scriptTag", 1)
+  $scriptTag = '    <script src="./twc-openid-ui-v3.js"></script>'
+  if ($index -match 'twc-openid-ui(?:-v3)?\.js') {
+    $index = [regex]::Replace($index, '\s*<script src="\.\/twc-openid-ui(?:-v3)?\.js(?:\?v=\d+)?"></script>', "`r`n$scriptTag", 1)
   } else {
     $index = $index.Replace('</head>', "$scriptTag`r`n  </head>")
   }
@@ -536,10 +536,14 @@ function Patch-FrontendAdminSettingsGuard([string]$frontendRoot) {
   if ($assets.Count -eq 0) { Fail "Missing Langflow frontend JavaScript bundle" }
   $patched = $false
   foreach ($asset in $assets) {
-    $content = Get-Content -LiteralPath $asset.FullName -Raw
+    # The Vite bundle is UTF-8 and contains non-ASCII literals.  PowerShell 5's
+    # Get-Content defaults to the active ANSI code page, which silently
+    # mojibakes the bundle and leaves Chromium with a syntax error.  Read and
+    # write the bytes with an explicit UTF-8 encoding instead.
+    $content = [IO.File]::ReadAllText($asset.FullName, [Text.UTF8Encoding]::new($false, $true))
     if ($content.Contains($old)) {
       $content = $content.Replace($old, $new)
-      Set-Content -LiteralPath $asset.FullName -Value $content -Encoding UTF8
+      [IO.File]::WriteAllText($asset.FullName, $content, [Text.UTF8Encoding]::new($false))
       $patched = $true
       break
     }

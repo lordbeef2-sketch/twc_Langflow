@@ -61,8 +61,12 @@
 
   function renderSettingsPanel(page) {
     var nativeForm = page.querySelector("form");
-    if (!nativeForm) return null;
-    nativeForm.style.display = "none";
+    if (nativeForm) nativeForm.style.display = "none";
+    // This build's stock SSO card controls the native OAuth/SAML lane.  The
+    // Workbench integration owns the page instead, so leave one unambiguous
+    // TWC OpenID control and avoid the unused native metadata request.
+    var nativeCard = page.children && page.children[1];
+    if (nativeCard) nativeCard.style.display = "none";
     var panel = page.querySelector("#twc-openid-settings");
     if (panel) return panel;
     panel = document.createElement("section");
@@ -152,8 +156,10 @@
     if (!/\/settings\/oauth-sso(?:\/|$)/.test(window.location.pathname)) return;
     var heading = document.querySelector('[data-testid="settings_oauth_sso_header"]');
     if (!heading) return;
-    var page = heading.parentElement;
-    while (page && page !== document.body && !page.querySelector("form")) page = page.parentElement;
+    // Langflow 1.12 renders the native provider form only after SSO is enabled.
+    // Anchor to the page section itself so the TWC form is available while the
+    // native form is absent, instead of silently rendering nothing.
+    var page = heading.parentElement && heading.parentElement.parentElement && heading.parentElement.parentElement.parentElement;
     if (page) renderSettingsPanel(page);
   }
 
