@@ -514,10 +514,13 @@ function Install-TwcOpenIdUi([string]$payloadRoot, [string]$frontendRoot) {
   Copy-Item -LiteralPath $uiSource -Destination $uiTarget -Force
   $indexPath = Join-Path $frontendRoot "index.html"
   $index = Get-Content -LiteralPath $indexPath -Raw
-  if ($index -notmatch 'twc-openid-ui\.js') {
-    $index = $index.Replace('</head>', "    <script src=`"./twc-openid-ui.js`"></script>`r`n  </head>")
-    Set-Content -LiteralPath $indexPath -Value $index -Encoding UTF8
+  $scriptTag = '    <script src="./twc-openid-ui.js?v=2"></script>'
+  if ($index -match 'twc-openid-ui\.js') {
+    $index = [regex]::Replace($index, '\s*<script src="\.\/twc-openid-ui\.js(?:\?v=\d+)?"></script>', "`r`n$scriptTag", 1)
+  } else {
+    $index = $index.Replace('</head>', "$scriptTag`r`n  </head>")
   }
+  Set-Content -LiteralPath $indexPath -Value $index -Encoding UTF8
   Patch-FrontendAdminSettingsGuard -frontendRoot $frontendRoot
   Ok "Installed GUI-only TWC OpenID sign-in control"
 }

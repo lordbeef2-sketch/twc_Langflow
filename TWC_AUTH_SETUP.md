@@ -12,9 +12,10 @@ an existing database does not need to be reset or manually edited.
 
 1. Launch Langflow and sign in as the local administrator.
 2. Open **Settings → OAuth SSO**.
-3. Enable SSO, then enter the TWC OpenID client ID, client secret, discovery
-   URL (or the explicit OIDC endpoints), redirect URI, and claim names. The
-   patch fixes the TWC defaults to the same Refresh3 contract as Workbench:
+3. Enable TWC OpenID, then enter only the Teamwork Cloud base URL, OpenID
+   application ID, client secret, and Langflow public URL. The GUI derives the
+   callback and discovery URL for you. The patch uses the same Refresh3
+   contract as Workbench:
    `openid` scope, AuthServer discovery on `/authentication/.well-known/oidc-configuration`,
    authorization on `/authentication/oidc/authorize`, token exchange on
    `/authentication/api/oidc/token` using `client_secret_basic` with
