@@ -537,6 +537,8 @@ function Patch-FrontendAdminSettingsGuard([string]$frontendRoot) {
   # settings APIs; the UI guard only needs the authenticated user's admin flag.
   $old = 'const NG=({children:e})=>{const{userData:t}=I.useContext(AE),r=wl(l=>l.isAuthenticated),o=wl(l=>l.autoLogin),s=wl(l=>l.isAdmin);return r?t&&!s||o?v.jsx(F6,{to:"/",replace:!0}):e:v.jsx(Tmt,{})}'
   $new = 'const NG=({children:e})=>{const{userData:t}=I.useContext(AE),r=wl(l=>l.isAuthenticated),s=wl(l=>l.isAdmin);return r?t&&!s?v.jsx(F6,{to:"/",replace:!0}):e:v.jsx(Tmt,{})}'
+  $autoLoginOld = 'const _=S.response?.data?.auto_login===!1;!d&&!_&&await b()'
+  $autoLoginNew = 'const _=S.response?.data?.auto_login===!1;if(!d){if(_)window.location.assign("/login");else await b()}'
   $assets = Get-ChildItem -LiteralPath (Join-Path $frontendRoot "assets") -Filter "index-*.js" -File
   if ($assets.Count -eq 0) { Fail "Missing Langflow frontend JavaScript bundle" }
   $patched = $false
@@ -550,9 +552,14 @@ function Patch-FrontendAdminSettingsGuard([string]$frontendRoot) {
       $content = $content.Replace($old, $new)
       [IO.File]::WriteAllText($asset.FullName, $content, [Text.UTF8Encoding]::new($false))
       $patched = $true
-      break
     }
-    if ($content.Contains($new)) { $patched = $true; break }
+    if ($content.Contains($autoLoginOld)) {
+      $content = $content.Replace($autoLoginOld, $autoLoginNew)
+      [IO.File]::WriteAllText($asset.FullName, $content, [Text.UTF8Encoding]::new($false))
+      $patched = $true
+    }
+    if ($content.Contains($new) -or $content.Contains($autoLoginNew)) { $patched = $true }
+    if ($patched) { break }
   }
   if ($patched) {
     Ok "Allowed authenticated superusers to open bundled settings routes"
