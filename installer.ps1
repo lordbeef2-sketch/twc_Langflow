@@ -1,7 +1,9 @@
 #!/usr/bin/env pwsh
 
 param(
-  [switch]$Force
+  [switch]$Force,
+  [string]$InstallRoot,
+  [switch]$NonInteractive
 )
 
 Set-StrictMode -Version Latest
@@ -276,7 +278,14 @@ function Ensure-EnvSetting([string]$envFile, [string]$key, [string]$value) {
   Set-Content -Path $envFile -Value ($line + "`r`n") -NoNewline
 }
 
-$PackageRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$PackageRoot = if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+  Split-Path -Parent $MyInvocation.MyCommand.Path
+} else {
+  [System.IO.Path]::GetFullPath($InstallRoot)
+}
+if (-not (Test-Path (Join-Path $PackageRoot "installer.ps1"))) {
+  Fail "Install root does not contain installer.ps1: $PackageRoot"
+}
 Set-Location $PackageRoot
 
 $PayloadRoot = Join-Path $PackageRoot "patcher_payload"
