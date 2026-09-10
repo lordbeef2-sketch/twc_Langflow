@@ -8,6 +8,7 @@ native secret helper; operators do not edit environment files.
 from __future__ import annotations
 
 import secrets
+import logging
 from datetime import timedelta
 from typing import Annotated, Any
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse
@@ -34,6 +35,7 @@ _NONCE_COOKIE = "langflow_twc_oidc_nonce"
 _NEXT_COOKIE = "langflow_twc_oidc_next"
 _CONFIG_SLUG = "twc-openid"
 _DEFAULT_NEXT = "/"
+_LOGGER = logging.getLogger(__name__)
 
 
 class SSOSettingsResponse(BaseModel):
@@ -384,6 +386,7 @@ async def start_sso(
     redirect_uri = _effective_redirect_uri(request, config.provider_settings.redirect_uri)
     if not endpoint or not client_id or not redirect_uri:
         raise HTTPException(status_code=400, detail="TWC OpenID configuration is incomplete")
+    _LOGGER.info("TWC OIDC authorize request: endpoint=%s client_id=%s redirect_uri=%s", endpoint, client_id, redirect_uri)
     state = secrets.token_urlsafe(32)
     nonce = secrets.token_urlsafe(32)
     scope = "openid"
