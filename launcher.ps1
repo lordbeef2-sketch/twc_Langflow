@@ -21,6 +21,10 @@ Then run .\installer.ps1 once to apply the patch.
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Installer = Join-Path $Root "installer.ps1"
 $LangflowExe = Join-Path $Root ".venv\Scripts\langflow.exe"
+if (-not (Test-Path $LangflowExe)) {
+  $pathCommand = Get-Command langflow.exe -ErrorAction SilentlyContinue
+  if ($null -ne $pathCommand) { $LangflowExe = $pathCommand.Source }
+}
 
 if (-not (Test-Path $Installer)) {
   Fail "Missing installer script: $Installer"

@@ -123,21 +123,30 @@ function Write-InstallState(
 }
 
 function Use-ExistingLocalVenv([string]$venvPath) {
-  if (-not (Test-Path $venvPath)) {
-    Fail ("Missing local .venv.`n`n" + (Get-ManualInstallHint))
+  $candidates = New-Object System.Collections.Generic.List[string]
+  if (Test-Path (Join-Path $venvPath "Scripts\python.exe")) { $candidates.Add((Join-Path $venvPath "Scripts\python.exe")) }
+  if ($env:VIRTUAL_ENV -and (Test-Path (Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"))) { $candidates.Add((Join-Path $env:VIRTUAL_ENV "Scripts\python.exe")) }
+  $langflowCommand = Get-Command langflow.exe -ErrorAction SilentlyContinue
+  if ($null -ne $langflowCommand) {
+    $candidate = Join-Path (Split-Path $langflowCommand.Source -Parent) "python.exe"
+    if (Test-Path $candidate) { $candidates.Add($candidate) }
   }
+  $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
+  if ($null -ne $pythonCommand) { $candidates.Add($pythonCommand.Source) }
 
-  $activateScript = Join-Path $venvPath "Scripts\Activate.ps1"
-  if (-not (Test-Path $activateScript)) {
-    Fail ("Missing activation script: $activateScript`n`n" + (Get-ManualInstallHint))
+  foreach ($candidate in ($candidates | Select-Object -Unique)) {
+    $probe = & $candidate -c "import langflow, lfx" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+      $script:PythonExecutable = $candidate
+      Info "Using existing Langflow runtime at $candidate"
+      return
+    }
   }
-
-  Info "Reusing local Python environment at $venvPath"
-  . $activateScript
+  Fail "No existing Python runtime with Langflow and LFX was found. Install Langflow separately, then rerun this patch installer."
 }
 
 function Assert-SupportedPython() {
-  $pythonVersionOutput = & python -c "import sys; print('.'.join(map(str, sys.version_info[:3])))"
+  $pythonVersionOutput = & $script:PythonExecutable -c "import sys; print('.'.join(map(str, sys.version_info[:3])))"
   if ($LASTEXITCODE -ne 0 -or $null -eq $pythonVersionOutput) {
     Fail "Unable to determine the Python version in the local environment"
   }
@@ -174,7 +183,7 @@ if importlib.util.find_spec("langflow") is not None and importlib.util.find_spec
 print(json.dumps(payload))
 '@
 
-  $layoutOutput = $script | & python -
+  $layoutOutput = $script | & $script:PythonExecutable -
   if ($LASTEXITCODE -ne 0 -or $null -eq $layoutOutput) {
     Fail ("Unable to inspect the installed Langflow package.`n`n" + (Get-ManualInstallHint))
   }
@@ -284,7 +293,7 @@ $BackendPayloadRoot = Join-Path $PayloadRoot "src\backend\base\langflow"
 $LfxPayloadRoot = Join-Path $PayloadRoot "src\lfx\src\lfx"
 $FrontendBundlePath = Join-Path $PayloadRoot "frontend_build.zip"
 $VenvPath = Join-Path $PackageRoot ".venv"
-$StateFile = Join-Path $VenvPath "langpatcher-state.json"
+$StateFile = Join-Path $PackageRoot "langpatcher-state.json"
 $EnvFile = Join-Path $PackageRoot ".env"
 
 if (-not (Test-Path $PayloadRoot)) {
