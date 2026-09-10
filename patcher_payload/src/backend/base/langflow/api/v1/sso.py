@@ -77,6 +77,19 @@ def _safe_next(value: str | None) -> str:
     return value
 
 
+def _effective_redirect_uri(request: Request, configured: str | None) -> str | None:
+    """Use Caddy's public host for the OIDC redirect when it is forwarded."""
+    forwarded_host = request.headers.get("x-forwarded-host")
+    if not forwarded_host:
+        return configured
+    host = forwarded_host.split(",", 1)[0].strip()
+    forwarded_proto = request.headers.get("x-forwarded-proto", "https")
+    scheme = forwarded_proto.split(",", 1)[0].strip().lower()
+    if scheme not in {"http", "https"} or not host:
+        return configured
+    return f"{scheme}://{host}/api/v1/sso/callback"
+
+
 def _config_response(config: SSOConfig) -> dict[str, Any]:
     settings = config.provider_settings
     return {
@@ -368,7 +381,7 @@ async def start_sso(
     metadata = await _oidc_metadata(config)
     endpoint = metadata.get("authorization_endpoint")
     client_id = config.provider_settings.client_id
-    redirect_uri = config.provider_settings.redirect_uri
+    redirect_uri = _effective_redirect_uri(request, config.provider_settings.redirect_uri)
     if not endpoint or not client_id or not redirect_uri:
         raise HTTPException(status_code=400, detail="TWC OpenID configuration is incomplete")
     state = secrets.token_urlsafe(32)
@@ -409,7 +422,7 @@ async def sso_callback(
     metadata = await _oidc_metadata(config)
     token_endpoint = metadata.get("token_endpoint")
     client_id = config.provider_settings.client_id
-    redirect_uri = config.provider_settings.redirect_uri
+    redirect_uri = _effective_redirect_uri(request, config.provider_settings.redirect_uri)
     if not token_endpoint or not client_id or not redirect_uri or config.client_secret_encrypted is None:
         raise HTTPException(status_code=400, detail="TWC OpenID token settings are incomplete")
     from langflow.services.database.models.auth.sso_secret import decrypt_sso_client_secret
