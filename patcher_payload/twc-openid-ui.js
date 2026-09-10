@@ -9,7 +9,6 @@
       'a[href="/settings/saml-sso"]{display:none!important}' +
       '#twc-openid-login{width:100%;margin-top:12px;padding:10px 14px;border-radius:6px;border:1px solid #6b7280;background:#111827;color:#fff;font-weight:600;cursor:pointer}' +
       '#twc-openid-login:hover{background:#1f2937}' +
-      '#twc-openid-login.twc-floating{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2147483647;width:min(360px,calc(100vw - 32px));box-shadow:0 8px 24px rgba(0,0,0,.3)}' +
       '#twc-openid-settings{margin-top:20px;padding:20px;border:1px solid hsl(var(--border));border-radius:8px;background:hsl(var(--background))}' +
       '#twc-openid-settings h3{font-size:16px;font-weight:600;margin:0 0 4px}' +
       '#twc-openid-settings p{font-size:12px;color:hsl(var(--muted-foreground));margin:0 0 16px}' +
@@ -167,46 +166,17 @@
   function addLoginButton() {
     if (!/\/login(?:\/|$)/.test(window.location.pathname)) return;
     if (document.getElementById("twc-openid-login")) return;
-    // This integration is SSO-only. Keep the native credential lane out of
-    // the rendered page; the backend enforces the same rule below.
-    Array.prototype.slice.call(document.querySelectorAll('input[type="text"],input[type="email"],input[type="password"],button[type="submit"]')).forEach(function (field) {
-      var shell = field.parentElement;
-      if (shell) shell.style.display = "none";
-    });
-    // Langflow's login markup changed: recent builds render the controls
-    // without a native <form>. Anchor to the submit/password control instead
-    // of silently dropping the TWC button when that wrapper is absent.
-    var anchor = document.querySelector("form");
-    if (!anchor) {
-      var submit = document.querySelector('button[type="submit"]');
-      anchor = submit && (submit.parentElement || submit);
-    }
-    if (!anchor) {
-      var password = document.querySelector('input[type="password"]');
-      anchor = password && (password.parentElement || password);
-    }
-    if (!anchor) {
-      var buttons = Array.prototype.slice.call(document.querySelectorAll("button"));
-      var signIn = buttons.find(function (candidate) {
-        return /\b(sign\s*in|log\s*in)\b/i.test((candidate.textContent || "").trim());
-      });
-      anchor = signIn && (signIn.parentElement || signIn);
-    }
-    var floating = false;
-    if (!anchor) {
-      anchor = document.body;
-      floating = true;
-    }
+    var form = document.querySelector("form");
+    if (!form) return;
     var button = document.createElement("button");
     button.id = "twc-openid-login";
-    if (floating) button.className = "twc-floating";
     button.type = "button";
     button.textContent = "Sign in with TWC OpenID";
     button.addEventListener("click", function () {
       var next = window.location.pathname + window.location.search;
       window.location.assign("/api/v1/sso/start/twc-openid?next=" + encodeURIComponent(next));
     });
-    anchor.appendChild(button);
+    form.appendChild(button);
   }
 
   function boot() {

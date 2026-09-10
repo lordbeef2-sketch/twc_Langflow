@@ -495,11 +495,6 @@ function Patch-StockLoginForTWCOpenId([string]$langflowRoot) {
     )
     $changed = $true
   }
-  $passwordGuard = '    if await _twc_sso_enabled(db):' + "`r`n" + '        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="TWC OpenID sign-in is required")' + "`r`n"
-  if ($content -notmatch 'TWC OpenID sign-in is required') {
-    $content = $content.Replace('    check_rate_limit(request)' + "`r`n", '    check_rate_limit(request)' + "`r`n" + $passwordGuard)
-    $changed = $true
-  }
   if ($content -notmatch 'def _langpatcher_local_only\(\)') {
     $helperBlock = 'def _langpatcher_local_only() -> bool:' + "`r`n" + '    return os.getenv("LANGPATCHER_LOCAL_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}' + "`r`n`r`n"
     $headerPattern = 'router = APIRouter\(tags=\["Login"\]\)\r?\n'
@@ -514,14 +509,14 @@ function Patch-StockLoginForTWCOpenId([string]$langflowRoot) {
 
 function Install-TwcOpenIdUi([string]$payloadRoot, [string]$frontendRoot) {
   $uiSource = Join-Path $payloadRoot "twc-openid-ui.js"
-  $uiTarget = Join-Path $frontendRoot "twc-openid-ui-v4.js"
+  $uiTarget = Join-Path $frontendRoot "twc-openid-ui-v3.js"
   if (-not (Test-Path -LiteralPath $uiSource)) { Fail "Missing TWC OpenID UI asset: $uiSource" }
   Copy-Item -LiteralPath $uiSource -Destination $uiTarget -Force
   $indexPath = Join-Path $frontendRoot "index.html"
   $index = Get-Content -LiteralPath $indexPath -Raw
-  $scriptTag = '    <script src="./twc-openid-ui-v4.js"></script>'
-  if ($index -match 'twc-openid-ui(?:-v[0-9]+)?\.js') {
-    $index = [regex]::Replace($index, '\s*<script src="\.\/twc-openid-ui(?:-v[0-9]+)?\.js(?:\?v=\d+)?"></script>', "`r`n$scriptTag", 1)
+  $scriptTag = '    <script src="./twc-openid-ui-v3.js"></script>'
+  if ($index -match 'twc-openid-ui(?:-v3)?\.js') {
+    $index = [regex]::Replace($index, '\s*<script src="\.\/twc-openid-ui(?:-v3)?\.js(?:\?v=\d+)?"></script>', "`r`n$scriptTag", 1)
   } else {
     $index = $index.Replace('</head>', "$scriptTag`r`n  </head>")
   }
@@ -537,8 +532,6 @@ function Patch-FrontendAdminSettingsGuard([string]$frontendRoot) {
   # settings APIs; the UI guard only needs the authenticated user's admin flag.
   $old = 'const NG=({children:e})=>{const{userData:t}=I.useContext(AE),r=wl(l=>l.isAuthenticated),o=wl(l=>l.autoLogin),s=wl(l=>l.isAdmin);return r?t&&!s||o?v.jsx(F6,{to:"/",replace:!0}):e:v.jsx(Tmt,{})}'
   $new = 'const NG=({children:e})=>{const{userData:t}=I.useContext(AE),r=wl(l=>l.isAuthenticated),s=wl(l=>l.isAdmin);return r?t&&!s?v.jsx(F6,{to:"/",replace:!0}):e:v.jsx(Tmt,{})}'
-  $autoLoginOld = 'const _=S.response?.data?.auto_login===!1;!d&&!_&&await b()'
-  $autoLoginNew = 'const _=S.response?.data?.auto_login===!1;if(!d){if(_)window.location.assign("/login");else await b()}'
   $assets = Get-ChildItem -LiteralPath (Join-Path $frontendRoot "assets") -Filter "index-*.js" -File
   if ($assets.Count -eq 0) { Fail "Missing Langflow frontend JavaScript bundle" }
   $patched = $false
@@ -552,14 +545,9 @@ function Patch-FrontendAdminSettingsGuard([string]$frontendRoot) {
       $content = $content.Replace($old, $new)
       [IO.File]::WriteAllText($asset.FullName, $content, [Text.UTF8Encoding]::new($false))
       $patched = $true
+      break
     }
-    if ($content.Contains($autoLoginOld)) {
-      $content = $content.Replace($autoLoginOld, $autoLoginNew)
-      [IO.File]::WriteAllText($asset.FullName, $content, [Text.UTF8Encoding]::new($false))
-      $patched = $true
-    }
-    if ($content.Contains($new) -or $content.Contains($autoLoginNew)) { $patched = $true }
-    if ($patched) { break }
+    if ($content.Contains($new)) { $patched = $true; break }
   }
   if ($patched) {
     Ok "Allowed authenticated superusers to open bundled settings routes"
