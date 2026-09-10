@@ -126,7 +126,7 @@ async def _oidc_metadata(config: SSOConfig) -> dict[str, Any]:
             # switch used for enterprise AuthServer deployments.  Langflow's
             # GUI has no second certificate store, so use the same relaxed
             # transport for this TWC-only lane.
-            async with httpx.AsyncClient(timeout=20, verify=False, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=20, verify=False, trust_env=False, follow_redirects=True) as client:
                 response = await client.get(settings.discovery_url)
                 response.raise_for_status()
                 metadata = response.json()
@@ -224,7 +224,7 @@ async def _claims_from_twc_token(token: str, metadata: dict[str, Any]) -> dict[s
     """Resolve the authenticated TWC user live, as Workbench does."""
     endpoint = _twc_current_user_endpoint(metadata)
     try:
-        async with httpx.AsyncClient(timeout=20, verify=False, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=20, verify=False, trust_env=False, follow_redirects=True) as client:
             response = await client.get(endpoint, headers={"Authorization": f"Token {token}", "Accept": "application/json"})
             response.raise_for_status()
             return _current_user_claims(response.json())
@@ -415,7 +415,7 @@ async def sso_callback(
     from langflow.services.database.models.auth.sso_secret import decrypt_sso_client_secret
 
     client_secret = decrypt_sso_client_secret(config.client_secret_encrypted, get_settings_service())
-    async with httpx.AsyncClient(timeout=20, verify=False, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=20, verify=False, trust_env=False, follow_redirects=True) as client:
         token_response = await client.post(token_endpoint, data={
             "grant_type": "authorization_code",
             "code": code,
