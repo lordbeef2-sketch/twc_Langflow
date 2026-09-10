@@ -178,7 +178,14 @@
       var password = document.querySelector('input[type="password"]');
       anchor = password && (password.parentElement || password);
     }
-    if (!anchor) return;
+    if (!anchor) {
+      var buttons = Array.prototype.slice.call(document.querySelectorAll("button"));
+      var signIn = buttons.find(function (candidate) {
+        return /\b(sign\s*in|log\s*in)\b/i.test((candidate.textContent || "").trim());
+      });
+      anchor = signIn && (signIn.parentElement || signIn);
+    }
+    if (!anchor) anchor = document.body;
     var button = document.createElement("button");
     button.id = "twc-openid-login";
     button.type = "button";
