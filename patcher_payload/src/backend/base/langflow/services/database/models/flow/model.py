@@ -10,8 +10,8 @@ import emoji
 from emoji import purely_emoji
 from lfx.log.logger import logger
 from pydantic import BaseModel, ValidationInfo, field_serializer, field_validator
+from sqlalchemy import Boolean, Text, UniqueConstraint, false, text
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Text, UniqueConstraint, text
 from sqlmodel import JSON, Column, Field, Relationship, SQLModel
 
 from langflow.schema.data import Data
@@ -46,6 +46,11 @@ def _validate_endpoint_name_value(v: str | None) -> str | None:
 class AccessTypeEnum(str, Enum):
     PRIVATE = "PRIVATE"
     PUBLIC = "PUBLIC"
+
+
+class FlowType(str, Enum):
+    WORKFLOW = "workflow"
+    AGENT = "agent"
 
 
 class FlowBase(SQLModel):
@@ -85,6 +90,16 @@ class FlowBase(SQLModel):
             server_default=text("'PRIVATE'"),
         ),
     )
+    flow_type: FlowType = Field(
+        default=FlowType.WORKFLOW,
+        sa_column=Column(
+            SQLEnum(FlowType, name="flow_type_enum", values_callable=lambda enum: [member.value for member in enum]),
+            nullable=False,
+            server_default=text("'workflow'"),
+        ),
+    )
+    a2a_enabled: bool | None = Field(default=False, sa_column=Column(Boolean, nullable=True, server_default=false()))
+    a2a_card_overrides: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
 
     @field_validator("endpoint_name")
     @classmethod
@@ -199,6 +214,7 @@ class Flow(FlowBase, table=True):  # type: ignore[call-arg]
     tags: list[str] | None = Field(sa_column=Column(JSON), default=[])
     locked: bool | None = Field(default=False, nullable=True)
     folder_id: UUID | None = Field(default=None, foreign_key="folder.id", nullable=True, index=True)
+    workspace_id: UUID | None = Field(default=None, nullable=True, index=True)
     fs_path: str | None = Field(default=None, nullable=True)
     folder: Optional["Folder"] = Relationship(back_populates="flows")
     shares: list["FlowShare"] = Relationship(
@@ -232,6 +248,7 @@ class FlowCreate(FlowBase):
     id: UUID | None = None
     user_id: UUID | None = None
     folder_id: UUID | None = None
+    workspace_id: UUID | None = None
     fs_path: str | None = None
 
 
@@ -243,6 +260,8 @@ class FlowRead(FlowBase):
     current_user_permission: FlowAccessLevel = Field(default=FlowAccessLevel.OWNER)
     shared_by_username: str | None = Field(default=None)
     viewer_folder_id: str | None = Field(default=None)
+    workspace_id: UUID | None = Field(default=None)
+    name_key: str | None = Field(default=None)
 
 
 class FlowHeader(BaseModel):
@@ -263,6 +282,9 @@ class FlowHeader(BaseModel):
     mcp_enabled: bool | None = Field(None, description="Flag indicating whether the flow is exposed in the MCP server")
     action_name: str | None = Field(None, description="The name of the action associated with the flow")
     action_description: str | None = Field(None, description="The description of the action associated with the flow")
+    flow_type: FlowType | None = Field(None)
+    a2a_enabled: bool | None = Field(None)
+    a2a_card_overrides: dict | None = Field(None)
     current_user_permission: FlowAccessLevel = Field(default=FlowAccessLevel.OWNER)
     shared_by_username: str | None = Field(default=None)
     viewer_folder_id: str | None = Field(default=None)
@@ -286,6 +308,10 @@ class FlowUpdate(SQLModel):
     action_name: str | None = None
     action_description: str | None = None
     access_type: AccessTypeEnum | None = None
+    flow_type: FlowType | None = None
+    a2a_enabled: bool | None = None
+    a2a_card_overrides: dict | None = None
+    workspace_id: UUID | None = None
     fs_path: str | None = None
 
     @field_validator("endpoint_name")

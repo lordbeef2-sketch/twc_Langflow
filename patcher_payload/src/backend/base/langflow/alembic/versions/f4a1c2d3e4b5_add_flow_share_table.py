@@ -1,7 +1,7 @@
 """add_flow_share_table
 
 Revision ID: f4a1c2d3e4b5
-Revises: d306e5c17c41
+Revises: d7e9f1a3b5c8
 Create Date: 2026-04-18 14:25:00.000000
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "f4a1c2d3e4b5"
-down_revision: str | Sequence[str] | None = "d306e5c17c41"
+down_revision: str | Sequence[str] | None = "d7e9f1a3b5c8"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
