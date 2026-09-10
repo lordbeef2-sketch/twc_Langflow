@@ -1,450 +1,585 @@
-"""TWC OpenID Connect sign-in and admin settings.
-
-This is intentionally a single OIDC lane.  Provider configuration is stored in
-Langflow's native ``SSOConfig`` table and the secret is encrypted by Langflow's
-native secret helper; operators do not edit environment files.
-"""
-
 from __future__ import annotations
 
+from html import escape as xml_escape
 import secrets
-from datetime import timedelta
-from typing import Annotated, Any
-from urllib.parse import urlencode, urljoin, urlparse, urlunparse
+from datetime import datetime, timezone
+from typing import Annotated, Any, Literal
+from urllib.parse import urlencode
 
 import httpx
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field
 from sqlmodel import select
 
-from langflow.api.utils.core import DbSession
-from langflow.services.auth.external import ExternalIdentity
+from langflow.api.utils import DbSession
 from langflow.services.auth.utils import get_current_active_superuser
-from langflow.services.database.models.auth.sso import OIDCProviderSettings, SSOConfig, SSOConfigCreate, SSOConfigUpdate
+from langflow.initial_setup.setup import get_or_create_default_folder
+from langflow.services.database.models.auth.sso import SSOConfig, SSOUserProfile
 from langflow.services.database.models.user.model import User
-from langflow.services.deps import get_auth_service, get_settings_service
+from langflow.services.deps import get_auth_service, get_settings_service, get_variable_service
 
-router = APIRouter(tags=["TWC OpenID"], prefix="/sso")
-admin_router = APIRouter(tags=["Admin Settings"], prefix="/admin/settings")
+router = APIRouter(tags=["SSO"], prefix="/sso")
 
-_STATE_COOKIE = "langflow_twc_oidc_state"
-_NONCE_COOKIE = "langflow_twc_oidc_nonce"
-_NEXT_COOKIE = "langflow_twc_oidc_next"
-_CONFIG_SLUG = "twc-openid"
-_DEFAULT_NEXT = "/"
+SSO_STATE_COOKIE = "sso_state_lf"
+SSO_NONCE_COOKIE = "sso_nonce_lf"
+SSO_PROVIDER_COOKIE = "sso_provider_lf"
+SSO_NEXT_COOKIE = "sso_next_lf"
 
 
-class SSOSettingsResponse(BaseModel):
-    sso_enabled: bool
-
-
-class SSOSettingsUpdateRequest(BaseModel):
-    sso_enabled: bool
-
-
-class TWCSSOConfigRequest(BaseModel):
-    # Kept compatible with the existing Langflow settings form.  ``oauth`` is
-    # accepted as a legacy UI value but is always persisted as OIDC.
-    provider: str = "oidc"
-    provider_name: str = "twc-openid"
+class SSOConfigRequest(BaseModel):
+    provider: Literal["oauth", "oidc", "saml"] = "oauth"
+    provider_name: str = Field(min_length=1, max_length=128)
     enabled: bool = True
     enforce_sso: bool = False
-    client_id: str = ""
-    client_secret: SecretStr | None = Field(default=None, repr=False)
+    client_id: str | None = None
+    client_secret: str | None = None
     discovery_url: str | None = None
     redirect_uri: str | None = None
-    # TWC Refresh3 advertises the narrow OpenID scope.  Keep this aligned with
-    # the Workbench AuthServer defaults instead of asking TWC for generic IdP
-    # profile scopes that it does not need for live authorization.
-    scopes: str = "openid"
+    scopes: str | None = "openid email profile"
     token_endpoint: str | None = None
     authorization_endpoint: str | None = None
     jwks_uri: str | None = None
     issuer: str | None = None
+
+    # SAML 2.0 fields (persisted in existing SSOConfig columns).
+    saml_entity_id: str | None = None
+    saml_acs_url: str | None = None
+    saml_idp_metadata_url: str | None = None
+    saml_idp_entity_id: str | None = None
+    saml_sso_url: str | None = None
+    saml_slo_url: str | None = None
+    saml_x509_cert: str | None = None
+    saml_nameid_format: str | None = None
+
     email_claim: str = "email"
     username_claim: str = "preferred_username"
     user_id_claim: str = "sub"
 
 
-def _safe_next(value: str | None) -> str:
-    if not value:
-        return _DEFAULT_NEXT
-    parsed = urlparse(value)
-    if parsed.scheme or parsed.netloc or not value.startswith("/") or value.startswith("//"):
-        return _DEFAULT_NEXT
-    return value
+class SSOConfigResponse(BaseModel):
+    provider: str
+    provider_name: str
+    enabled: bool
+    enforce_sso: bool
+    client_id: str | None
+    discovery_url: str | None
+    redirect_uri: str | None
+    scopes: str | None
+    token_endpoint: str | None
+    authorization_endpoint: str | None
+    jwks_uri: str | None
+    issuer: str | None
+    email_claim: str
+    username_claim: str
+    user_id_claim: str
+    has_client_secret: bool
+
+    # Derived SAML fields.
+    saml_entity_id: str | None = None
+    saml_acs_url: str | None = None
+    saml_idp_metadata_url: str | None = None
+    saml_idp_entity_id: str | None = None
+    saml_sso_url: str | None = None
+    saml_slo_url: str | None = None
+    saml_x509_cert: str | None = None
+    saml_nameid_format: str | None = None
 
 
-def _config_response(config: SSOConfig) -> dict[str, Any]:
-    settings = config.provider_settings
-    return {
-        "provider": "oidc",
-        "provider_name": "twc-openid",
-        "enabled": config.enabled,
-        "enforce_sso": False,
-        "client_id": settings.client_id,
-        "discovery_url": settings.discovery_url,
-        "redirect_uri": settings.redirect_uri,
-        "scopes": "openid",
-        "token_endpoint": settings.token_endpoint,
-        "authorization_endpoint": settings.authorization_endpoint,
-        "jwks_uri": settings.jwks_uri,
-        "issuer": settings.issuer,
-        "email_claim": config.email_claim,
-        "username_claim": config.username_claim,
-        "user_id_claim": config.user_id_claim,
-        "has_client_secret": config.client_secret_encrypted is not None,
-    }
+class SAMLMetadataResponse(BaseModel):
+    provider_name: str
+    metadata_xml: str
 
 
-async def _get_config(db: DbSession, *, include_disabled: bool = True) -> SSOConfig | None:
-    stmt = select(SSOConfig).where(SSOConfig.slug == _CONFIG_SLUG)
-    if not include_disabled:
-        stmt = stmt.where(SSOConfig.enabled.is_(True))
-    return (await db.exec(stmt)).first()
+def _ensure_sso_enabled() -> None:
+    if not get_settings_service().auth_settings.SSO_ENABLED:
+        raise HTTPException(status_code=403, detail="SSO is disabled")
 
 
-async def _enabled_config(db: DbSession) -> SSOConfig:
-    config = await _get_config(db, include_disabled=False)
-    if config is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TWC OpenID is not configured")
+def _config_to_response(config: SSOConfig) -> SSOConfigResponse:
+    is_saml = config.provider.lower() == "saml"
+    return SSOConfigResponse(
+        provider=config.provider,
+        provider_name=config.provider_name,
+        enabled=config.enabled,
+        enforce_sso=config.enforce_sso,
+        client_id=config.client_id,
+        discovery_url=config.discovery_url,
+        redirect_uri=config.redirect_uri,
+        scopes=config.scopes,
+                token_endpoint=config.token_endpoint,
+                authorization_endpoint=config.authorization_endpoint,
+                jwks_uri=config.jwks_uri,
+                issuer=config.issuer,
+        email_claim=config.email_claim,
+        username_claim=config.username_claim,
+        user_id_claim=config.user_id_claim,
+        has_client_secret=bool(config.client_secret_encrypted),
+                saml_entity_id=config.client_id if is_saml else None,
+                saml_acs_url=config.redirect_uri if is_saml else None,
+                saml_idp_metadata_url=config.discovery_url if is_saml else None,
+                saml_idp_entity_id=config.issuer if is_saml else None,
+                saml_sso_url=config.authorization_endpoint if is_saml else None,
+                saml_slo_url=config.token_endpoint if is_saml else None,
+                saml_x509_cert=config.jwks_uri if is_saml else None,
+                saml_nameid_format=config.scopes if is_saml else None,
+    )
+
+
+def _normalize_provider(provider: str) -> str:
+        p = provider.strip().lower()
+        if p not in {"oauth", "oidc", "saml"}:
+                raise HTTPException(status_code=400, detail="Provider must be one of: oauth, oidc, saml")
+        return p
+
+
+def _build_saml_metadata(config: SSOConfig) -> str:
+        entity_id = (config.client_id or "").strip()
+        acs_url = (config.redirect_uri or "").strip()
+        idp_entity_id = (config.issuer or "").strip()
+        idp_sso_url = (config.authorization_endpoint or "").strip()
+        idp_slo_url = (config.token_endpoint or "").strip()
+        cert = (config.jwks_uri or "").strip()
+        nameid_format = (config.scopes or "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress").strip()
+
+        if not entity_id or not acs_url:
+                raise HTTPException(status_code=400, detail="SAML metadata requires saml_entity_id and saml_acs_url")
+
+        cert_clean = cert.replace("-----BEGIN CERTIFICATE-----", "").replace("-----END CERTIFICATE-----", "")
+        cert_clean = "".join(cert_clean.split())
+
+        cert_block = (
+                f"""
+            <KeyDescriptor use=\"signing\"> 
+                <KeyInfo xmlns=\"http://www.w3.org/2000/09/xmldsig#\"> 
+                    <X509Data><X509Certificate>{xml_escape(cert_clean)}</X509Certificate></X509Data>
+                </KeyInfo>
+            </KeyDescriptor>"""
+                if cert_clean
+                else ""
+        )
+
+        sso_service = ""
+        if idp_sso_url:
+                sso_service = (
+                        '<SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" '
+                        f'Location="{xml_escape(idp_sso_url)}" />'
+                )
+
+        slo_service = ""
+        if idp_slo_url:
+                slo_service = (
+                        '<SingleLogoutService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" '
+                        f'Location="{xml_escape(idp_slo_url)}" />'
+                )
+
+        idp_descriptor = ""
+        if idp_entity_id or idp_sso_url or idp_slo_url:
+                idp_descriptor = f"""
+    <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+        {sso_service}
+        {slo_service}
+    </IDPSSODescriptor>"""
+
+        return f"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<EntityDescriptor xmlns=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"{xml_escape(entity_id)}\">
+    <SPSSODescriptor AuthnRequestsSigned=\"false\" WantAssertionsSigned=\"false\" protocolSupportEnumeration=\"urn:oasis:names:tc:SAML:2.0:protocol\">
+        <NameIDFormat>{xml_escape(nameid_format)}</NameIDFormat>
+        <AssertionConsumerService Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST\" Location=\"{xml_escape(acs_url)}\" index=\"0\" isDefault=\"true\" />
+        {cert_block}
+    </SPSSODescriptor>
+    {idp_descriptor}
+</EntityDescriptor>
+"""
+
+
+async def _get_config(session: DbSession, provider_name: str, *, allowed_providers: set[str] | None = None) -> SSOConfig:
+    stmt = select(SSOConfig).where(SSOConfig.provider_name == provider_name)
+    config = (await session.exec(stmt)).first()
+    if not config or not config.enabled:
+        raise HTTPException(status_code=404, detail="SSO provider not found or disabled")
+        provider = config.provider.lower()
+        if allowed_providers and provider not in allowed_providers:
+                allowed = ", ".join(sorted(allowed_providers))
+                raise HTTPException(status_code=400, detail=f"Provider '{provider}' is not supported for this operation. Allowed: {allowed}")
     return config
 
 
-async def is_sso_enabled(db: DbSession) -> bool:
-    """Return the persisted provider state for Langflow's login endpoint."""
-    return await _get_config(db, include_disabled=False) is not None
+def _safe_next(next_url: str | None) -> str:
+    if not next_url or not next_url.startswith("/"):
+        return "/"
+    return next_url
 
 
-async def _oidc_metadata(config: SSOConfig) -> dict[str, Any]:
-    settings = config.provider_settings
-    if settings.discovery_url:
-        try:
-            # Workbench's TWC server profiles expose the same TLS-relaxed
-            # switch used for enterprise AuthServer deployments.  Langflow's
-            # GUI has no second certificate store, so use the same relaxed
-            # transport for this TWC-only lane.
-            async with httpx.AsyncClient(timeout=20, verify=False, follow_redirects=True) as client:
-                response = await client.get(settings.discovery_url)
-                response.raise_for_status()
-                metadata = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise HTTPException(status_code=502, detail="Unable to reach the TWC OpenID discovery endpoint") from exc
+async def _fetch_discovery(discovery_url: str) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.get(discovery_url)
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _set_cookie(response: Response, key: str, value: str, *, max_age: int | None = None) -> None:
+    auth_settings = get_settings_service().auth_settings
+    response.set_cookie(
+        key,
+        value,
+        httponly=True,
+        samesite=auth_settings.ACCESS_SAME_SITE,
+        secure=auth_settings.ACCESS_SECURE,
+        max_age=max_age,
+        domain=auth_settings.COOKIE_DOMAIN,
+    )
+
+
+def _delete_cookie(response: Response, key: str) -> None:
+    auth_settings = get_settings_service().auth_settings
+    response.delete_cookie(
+        key,
+        httponly=True,
+        samesite=auth_settings.ACCESS_SAME_SITE,
+        secure=auth_settings.ACCESS_SECURE,
+        domain=auth_settings.COOKIE_DOMAIN,
+    )
+
+
+def _set_auth_cookies(response: Response, tokens: dict[str, str], user: User) -> None:
+    auth_settings = get_settings_service().auth_settings
+    response.set_cookie(
+        "refresh_token_lf",
+        tokens["refresh_token"],
+        httponly=auth_settings.REFRESH_HTTPONLY,
+        samesite=auth_settings.REFRESH_SAME_SITE,
+        secure=auth_settings.REFRESH_SECURE,
+        expires=auth_settings.REFRESH_TOKEN_EXPIRE_SECONDS,
+        domain=auth_settings.COOKIE_DOMAIN,
+    )
+    response.set_cookie(
+        "access_token_lf",
+        tokens["access_token"],
+        httponly=auth_settings.ACCESS_HTTPONLY,
+        samesite=auth_settings.ACCESS_SAME_SITE,
+        secure=auth_settings.ACCESS_SECURE,
+        expires=auth_settings.ACCESS_TOKEN_EXPIRE_SECONDS,
+        domain=auth_settings.COOKIE_DOMAIN,
+    )
+    response.set_cookie(
+        "apikey_tkn_lflw",
+        str(user.store_api_key or ""),
+        httponly=auth_settings.ACCESS_HTTPONLY,
+        samesite=auth_settings.ACCESS_SAME_SITE,
+        secure=auth_settings.ACCESS_SECURE,
+        expires=None,
+        domain=auth_settings.COOKIE_DOMAIN,
+    )
+
+
+async def _get_or_create_sso_user(
+    session: DbSession,
+    config: SSOConfig,
+    claims: dict[str, Any],
+) -> User:
+    provider_user_id = str(claims.get(config.user_id_claim) or "")
+    if not provider_user_id:
+        raise HTTPException(status_code=400, detail=f"Missing claim: {config.user_id_claim}")
+
+    stmt = select(SSOUserProfile).where(
+        SSOUserProfile.sso_provider == config.provider_name,
+        SSOUserProfile.sso_user_id == provider_user_id,
+    )
+    profile = (await session.exec(stmt)).first()
+    now = datetime.now(timezone.utc)
+
+    if profile:
+        user = await session.get(User, profile.user_id)
+        if not user:
+            raise HTTPException(status_code=400, detail="Corrupt SSO profile: user not found")
+        profile.sso_last_login_at = now
+        profile.updated_at = now
+        await session.flush()
+        return user
+
+    username_base = str(claims.get(config.username_claim) or claims.get(config.email_claim) or "sso-user").strip()
+    username_base = username_base.lower().replace(" ", "-")
+    username_base = "".join(c for c in username_base if c.isalnum() or c in {"-", "_", "."})[:40] or "sso-user"
+
+    username = username_base
+    suffix = 1
+    while (await session.exec(select(User).where(User.username == username))).first() is not None:
+        suffix += 1
+        username = f"{username_base}-{suffix}"
+
+    user = User(
+        username=username,
+        password=get_auth_service().get_password_hash(secrets.token_urlsafe(48)),
+        is_active=True,
+        is_superuser=False,
+    )
+    session.add(user)
+    await session.flush()
+    await session.refresh(user)
+
+    profile = SSOUserProfile(
+        user_id=user.id,
+        sso_provider=config.provider_name,
+        sso_user_id=provider_user_id,
+        email=str(claims.get(config.email_claim) or "") or None,
+        sso_last_login_at=now,
+    )
+    session.add(profile)
+    await session.flush()
+    return user
+
+
+@router.get("/providers", response_model=list[SSOConfigResponse])
+async def list_sso_providers(session: DbSession):
+    _ensure_sso_enabled()
+    stmt = select(SSOConfig).where(SSOConfig.enabled == True)  # noqa: E712
+    configs = (await session.exec(stmt)).all()
+    # Only expose providers supported by /start and /callback.
+    return [_config_to_response(cfg) for cfg in configs if cfg.provider.lower() in {"oauth", "oidc"}]
+
+
+@router.get("/config", response_model=list[SSOConfigResponse])
+async def list_sso_configs_admin(
+    current_user: Annotated[User, Depends(get_current_active_superuser)],
+    session: DbSession,
+):
+    _ = current_user
+    _ensure_sso_enabled()
+    configs = (await session.exec(select(SSOConfig))).all()
+    return [_config_to_response(cfg) for cfg in configs]
+
+
+@router.put("/config", response_model=SSOConfigResponse)
+async def upsert_sso_config(
+    payload: SSOConfigRequest,
+    current_user: Annotated[User, Depends(get_current_active_superuser)],
+    session: DbSession,
+):
+    _ensure_sso_enabled()
+    provider = _normalize_provider(payload.provider)
+
+    if provider in {"oauth", "oidc"}:
+        if not (payload.client_id and payload.redirect_uri):
+            raise HTTPException(status_code=400, detail="OAuth setup requires client_id and redirect_uri")
+        has_discovery = bool(payload.discovery_url)
+        has_manual_endpoints = bool(payload.authorization_endpoint and payload.token_endpoint and payload.jwks_uri)
+        if not has_discovery and not has_manual_endpoints:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide discovery_url or all manual endpoints (authorization_endpoint, token_endpoint, jwks_uri)",
+            )
     else:
-        metadata = {}
-    return {
-        **metadata,
-        "authorization_endpoint": settings.authorization_endpoint or metadata.get("authorization_endpoint"),
-        "token_endpoint": settings.token_endpoint or metadata.get("token_endpoint"),
-        "jwks_uri": settings.jwks_uri or metadata.get("jwks_uri"),
-        "issuer": settings.issuer or metadata.get("issuer"),
-        "userinfo_endpoint": metadata.get("userinfo_endpoint"),
-        "token_endpoint_auth_methods_supported": metadata.get("token_endpoint_auth_methods_supported", ["client_secret_basic"]),
-    }
+        if not (payload.saml_entity_id and payload.saml_acs_url):
+            raise HTTPException(status_code=400, detail="SAML setup requires saml_entity_id and saml_acs_url")
 
+    stmt = select(SSOConfig).where(SSOConfig.provider_name == payload.provider_name)
+    config = (await session.exec(stmt)).first()
+    encrypted_secret = get_auth_service().encrypt_api_key(payload.client_secret) if payload.client_secret else None
 
-def _claims_from_id_token(token: str, metadata: dict[str, Any], client_id: str, nonce: str) -> dict[str, Any]:
-    header = jwt.get_unverified_header(token)
-    kid = header.get("kid")
-    # PyJWKClient performs the standard JWKS retrieval and selects the matching
-    # key.  It is used only after the token endpoint has returned an ID token.
-    jwks_uri = metadata.get("jwks_uri")
-    if not jwks_uri:
-        raise HTTPException(status_code=502, detail="TWC OpenID metadata has no JWKS endpoint")
-    try:
-        key = jwt.PyJWKClient(jwks_uri).get_signing_key_from_jwt(token).key
-    except (jwt.PyJWTError, OSError) as exc:
-        raise HTTPException(status_code=502, detail="Unable to validate the TWC OpenID signing key") from exc
-    options = {"verify_aud": bool(client_id)}
-    try:
-        claims = jwt.decode(
-            token,
-            key=key,
-            algorithms=[header.get("alg", "RS256")],
-            audience=client_id or None,
-            issuer=metadata.get("issuer") or None,
-            options=options,
-        )
-    except jwt.PyJWTError as exc:
-        raise HTTPException(status_code=400, detail="Invalid TWC OpenID ID token") from exc
-    if claims.get("nonce") != nonce:
-        raise HTTPException(status_code=400, detail="Invalid TWC OpenID nonce")
-    if not claims.get("sub"):
-        raise HTTPException(status_code=400, detail="TWC OpenID response has no subject")
-    return claims
-
-
-def _twc_current_user_endpoint(metadata: dict[str, Any]) -> str:
-    """Build the same live TWC identity endpoint used by Workbench."""
-    source = metadata.get("issuer") or metadata.get("authorization_endpoint") or metadata.get("token_endpoint")
-    if not source:
-        raise HTTPException(status_code=502, detail="TWC OpenID metadata has no Teamwork Cloud host")
-    parsed = urlparse(str(source))
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise HTTPException(status_code=502, detail="TWC OpenID metadata has an invalid Teamwork Cloud host")
-    return urlunparse((parsed.scheme, parsed.netloc, "/osmc/admin/currentUser", "", "permission=true", ""))
-
-
-def _current_user_claims(payload: Any) -> dict[str, Any]:
-    """Normalize TWC's currentUser envelope into Langflow identity claims."""
-    candidates: list[dict[str, Any]] = []
-    if isinstance(payload, dict):
-        candidates.append(payload)
-        for key in ("user", "data", "item"):
-            value = payload.get(key)
-            if isinstance(value, dict):
-                candidates.append(value)
-    elif isinstance(payload, list):
-        candidates.extend(value for value in payload if isinstance(value, dict))
-    for candidate in candidates:
-        username = (
-            candidate.get("preferred_username")
-            or candidate.get("username")
-            or candidate.get("userName")
-            or candidate.get("login")
-            or candidate.get("name")
-            or candidate.get("email")
-        )
-        subject = candidate.get("sub") or candidate.get("id") or candidate.get("userId") or username
-        if username and subject:
-            claims = dict(candidate)
-            claims.setdefault("sub", str(subject))
-            claims.setdefault("preferred_username", str(username))
-            if candidate.get("email"):
-                claims.setdefault("email", candidate["email"])
-            if candidate.get("name"):
-                claims.setdefault("name", candidate["name"])
-            return claims
-    raise HTTPException(status_code=502, detail="TWC currentUser did not return an authenticated user")
-
-
-async def _claims_from_twc_token(token: str, metadata: dict[str, Any]) -> dict[str, Any]:
-    """Resolve the authenticated TWC user live, as Workbench does."""
-    endpoint = _twc_current_user_endpoint(metadata)
-    try:
-        async with httpx.AsyncClient(timeout=20, verify=False, follow_redirects=True) as client:
-            response = await client.get(endpoint, headers={"Authorization": f"Token {token}", "Accept": "application/json"})
-            response.raise_for_status()
-            return _current_user_claims(response.json())
-    except (httpx.HTTPError, ValueError) as exc:
-        raise HTTPException(status_code=502, detail="Unable to resolve the authenticated TWC user from /osmc/admin/currentUser") from exc
-
-
-async def _materialize_user(config: SSOConfig, claims: dict[str, Any], db: DbSession) -> User:
-    settings = get_settings_service().auth_settings
-    email = claims.get(config.email_claim)
-    username = claims.get(config.username_claim) or email or claims.get("name") or claims.get("sub")
-    name = claims.get("name")
-    identity = ExternalIdentity(
-        provider=config.slug,
-        subject=str(claims[config.user_id_claim] if config.user_id_claim in claims else claims["sub"]),
-        username=str(username),
-        email=str(email) if email else None,
-        name=str(name) if name else None,
-        claims=claims,
-    )
-    return await get_auth_service()._materialize_external_user(identity, db)  # noqa: SLF001
-
-
-def _set_session_cookies(response: Response, tokens: dict[str, str], user: User) -> None:
-    auth = get_settings_service().auth_settings
-    response.set_cookie("refresh_token_lf", tokens["refresh_token"], httponly=auth.REFRESH_HTTPONLY,
-                        samesite=auth.REFRESH_SAME_SITE, secure=auth.REFRESH_SECURE,
-                        expires=auth.REFRESH_TOKEN_EXPIRE_SECONDS, domain=auth.COOKIE_DOMAIN)
-    response.set_cookie("access_token_lf", tokens["access_token"], httponly=auth.ACCESS_HTTPONLY,
-                        samesite=auth.ACCESS_SAME_SITE, secure=auth.ACCESS_SECURE,
-                        expires=auth.ACCESS_TOKEN_EXPIRE_SECONDS, domain=auth.COOKIE_DOMAIN)
-    response.set_cookie("apikey_tkn_lflw", str(user.store_api_key or ""), httponly=auth.ACCESS_HTTPONLY,
-                        samesite=auth.ACCESS_SAME_SITE, secure=auth.ACCESS_SECURE,
-                        expires=None, domain=auth.COOKIE_DOMAIN)
-
-
-@router.get("/providers")
-async def list_sso_providers(db: DbSession) -> list[dict[str, Any]]:
-    config = await _get_config(db, include_disabled=False)
-    return [] if config is None else [_config_response(config)]
-
-
-@router.get("/config")
-async def get_sso_config(
-    _admin: Annotated[User, Depends(get_current_active_superuser)], db: DbSession
-) -> list[dict[str, Any]]:
-    config = await _get_config(db)
-    return [] if config is None else [_config_response(config)]
-
-
-@router.put("/config")
-async def put_sso_config(
-    payload: TWCSSOConfigRequest,
-    admin: Annotated[User, Depends(get_current_active_superuser)],
-    db: DbSession,
-) -> dict[str, Any]:
-    if not payload.client_id.strip():
-        raise HTTPException(status_code=400, detail="OpenID client ID is required")
-    provider_settings = OIDCProviderSettings(
-        discovery_url=payload.discovery_url or None,
-        redirect_uri=payload.redirect_uri or None,
-        scopes="openid",
-        token_endpoint=payload.token_endpoint or None,
-        authorization_endpoint=payload.authorization_endpoint or None,
-        jwks_uri=payload.jwks_uri or None,
-        issuer=payload.issuer or None,
-        client_id=payload.client_id.strip(),
-    )
-    config = await _get_config(db)
-    if config is None:
-        create = SSOConfigCreate(
-            display_name="TWC OpenID",
+    if not config:
+        if provider in {"oauth", "oidc"} and not encrypted_secret:
+            raise HTTPException(status_code=400, detail="client_secret is required for new OAuth providers")
+        config = SSOConfig(
+            provider=provider,
+            provider_name=payload.provider_name,
             enabled=payload.enabled,
-            client_secret=payload.client_secret,
-            provider_settings=provider_settings,
+            enforce_sso=payload.enforce_sso,
+            client_id=payload.client_id if provider in {"oauth", "oidc"} else payload.saml_entity_id,
+            client_secret_encrypted=encrypted_secret,
+            discovery_url=payload.discovery_url if provider in {"oauth", "oidc"} else payload.saml_idp_metadata_url,
+            redirect_uri=payload.redirect_uri if provider in {"oauth", "oidc"} else payload.saml_acs_url,
+            scopes=payload.scopes if provider in {"oauth", "oidc"} else payload.saml_nameid_format,
             email_claim=payload.email_claim,
             username_claim=payload.username_claim,
             user_id_claim=payload.user_id_claim,
+            token_endpoint=payload.token_endpoint if provider in {"oauth", "oidc"} else payload.saml_slo_url,
+            authorization_endpoint=payload.authorization_endpoint if provider in {"oauth", "oidc"} else payload.saml_sso_url,
+            jwks_uri=payload.jwks_uri if provider in {"oauth", "oidc"} else payload.saml_x509_cert,
+            issuer=payload.issuer if provider in {"oauth", "oidc"} else payload.saml_idp_entity_id,
+            created_by=current_user.id,
         )
-        config = create.to_model(get_settings_service(), actor_id=admin.id)
-        config.slug = _CONFIG_SLUG
-        db.add(config)
+        session.add(config)
     else:
-        update_values: dict[str, Any] = {
-            "enabled": payload.enabled,
-            "provider_settings": provider_settings,
-            "email_claim": payload.email_claim,
-            "username_claim": payload.username_claim,
-            "user_id_claim": payload.user_id_claim,
-        }
-        if payload.client_secret is not None:
-            update_values["client_secret"] = payload.client_secret
-        update = SSOConfigUpdate(**update_values)
-        config = update.apply_to(config, get_settings_service(), actor_id=admin.id)
-        config.display_name = "TWC OpenID"
-        db.add(config)
-    await db.commit()
-    await db.refresh(config)
-    # The GUI controls the auth mode.  Langflow's own auto-login endpoint is
-    # guarded below by the persisted provider, so no environment edit/restart
-    # is required when SSO is enabled.
-    get_settings_service().auth_settings.SSO_ENABLED = payload.enabled
-    if payload.enabled:
-        get_settings_service().auth_settings.AUTO_LOGIN = False
-    return _config_response(config)
+        config.provider = provider
+        config.enabled = payload.enabled
+        config.enforce_sso = payload.enforce_sso
+        config.client_id = payload.client_id if provider in {"oauth", "oidc"} else payload.saml_entity_id
+        if encrypted_secret:
+            config.client_secret_encrypted = encrypted_secret
+        config.discovery_url = payload.discovery_url if provider in {"oauth", "oidc"} else payload.saml_idp_metadata_url
+        config.redirect_uri = payload.redirect_uri if provider in {"oauth", "oidc"} else payload.saml_acs_url
+        config.scopes = payload.scopes if provider in {"oauth", "oidc"} else payload.saml_nameid_format
+        config.email_claim = payload.email_claim
+        config.username_claim = payload.username_claim
+        config.user_id_claim = payload.user_id_claim
+        config.token_endpoint = payload.token_endpoint if provider in {"oauth", "oidc"} else payload.saml_slo_url
+        config.authorization_endpoint = payload.authorization_endpoint if provider in {"oauth", "oidc"} else payload.saml_sso_url
+        config.jwks_uri = payload.jwks_uri if provider in {"oauth", "oidc"} else payload.saml_x509_cert
+        config.issuer = payload.issuer if provider in {"oauth", "oidc"} else payload.saml_idp_entity_id
+        config.updated_at = datetime.now(timezone.utc)
+
+    await session.flush()
+    await session.refresh(config)
+    return _config_to_response(config)
 
 
-@admin_router.get("/sso", response_model=SSOSettingsResponse)
-async def get_sso_settings(_admin: Annotated[User, Depends(get_current_active_superuser)], db: DbSession):
-    config = await _get_config(db, include_disabled=False)
-    return SSOSettingsResponse(sso_enabled=config is not None)
-
-
-@admin_router.put("/sso", response_model=SSOSettingsResponse)
-async def put_sso_settings(
-    payload: SSOSettingsUpdateRequest,
-    _admin: Annotated[User, Depends(get_current_active_superuser)],
-    db: DbSession,
-):
-    config = await _get_config(db)
-    if config is not None:
-        config.enabled = payload.sso_enabled
-        db.add(config)
-        await db.commit()
-        await db.refresh(config)
-    get_settings_service().auth_settings.SSO_ENABLED = payload.sso_enabled
-    if payload.sso_enabled:
-        get_settings_service().auth_settings.AUTO_LOGIN = False
-    return SSOSettingsResponse(sso_enabled=payload.sso_enabled)
-
-
-@router.get("/start/{provider_name}", include_in_schema=False)
-async def start_sso(
+@router.get("/config/{provider_name}/saml/metadata", response_model=SAMLMetadataResponse)
+async def get_saml_metadata_admin(
     provider_name: str,
-    request: Request,
-    response: Response,
-    db: DbSession,
-    next: str | None = Query(default=None),
+    current_user: Annotated[User, Depends(get_current_active_superuser)],
+    session: DbSession,
 ):
-    config = await _enabled_config(db)
-    metadata = await _oidc_metadata(config)
-    endpoint = metadata.get("authorization_endpoint")
-    client_id = config.provider_settings.client_id
-    redirect_uri = config.provider_settings.redirect_uri
-    if not endpoint or not client_id or not redirect_uri:
-        raise HTTPException(status_code=400, detail="TWC OpenID configuration is incomplete")
+    _ = current_user
+    _ensure_sso_enabled()
+    config = await _get_config(session, provider_name, allowed_providers={"saml"})
+    return SAMLMetadataResponse(
+        provider_name=provider_name,
+        metadata_xml=_build_saml_metadata(config),
+    )
+
+
+@router.get("/config/{provider_name}/saml/metadata.xml")
+async def download_saml_metadata_admin(
+    provider_name: str,
+    current_user: Annotated[User, Depends(get_current_active_superuser)],
+    session: DbSession,
+):
+    _ = current_user
+    _ensure_sso_enabled()
+    config = await _get_config(session, provider_name, allowed_providers={"saml"})
+    xml = _build_saml_metadata(config)
+    response = Response(content=xml, media_type="application/samlmetadata+xml")
+    response.headers["Content-Disposition"] = f'attachment; filename="{provider_name}-metadata.xml"'
+    return response
+
+
+@router.get("/start/{provider_name}")
+async def sso_start(
+    provider_name: str,
+    session: DbSession,
+    next_url: Annotated[str | None, Query(alias="next")] = None,
+):
+    _ensure_sso_enabled()
+    config = await _get_config(session, provider_name, allowed_providers={"oauth", "oidc"})
+
+    metadata: dict[str, Any] = {}
+    if config.discovery_url:
+        metadata = await _fetch_discovery(config.discovery_url)
+
+    authorization_endpoint = config.authorization_endpoint or metadata.get("authorization_endpoint")
+    if not authorization_endpoint:
+        raise HTTPException(status_code=400, detail="OAuth authorization endpoint not configured")
+
     state = secrets.token_urlsafe(32)
     nonce = secrets.token_urlsafe(32)
-    scope = "openid"
+
     params = {
         "response_type": "code",
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "scope": scope,
+        "client_id": config.client_id,
+        "redirect_uri": config.redirect_uri,
+        "scope": config.scopes or "openid email profile",
         "state": state,
         "nonce": nonce,
     }
-    redirect = RedirectResponse(url=f"{endpoint}?{urlencode(params)}", status_code=302)
-    auth = get_settings_service().auth_settings
-    for name, value in ((_STATE_COOKIE, state), (_NONCE_COOKIE, nonce), (_NEXT_COOKIE, _safe_next(next))):
-        redirect.set_cookie(name, value, httponly=True, samesite="lax", secure=auth.ACCESS_SECURE,
-                            max_age=600, domain=auth.COOKIE_DOMAIN)
-    return redirect
+    target = f"{authorization_endpoint}?{urlencode(params)}"
+
+    response = RedirectResponse(url=target, status_code=307)
+    _set_cookie(response, SSO_STATE_COOKIE, state, max_age=600)
+    _set_cookie(response, SSO_NONCE_COOKIE, nonce, max_age=600)
+    _set_cookie(response, SSO_PROVIDER_COOKIE, provider_name, max_age=600)
+    _set_cookie(response, SSO_NEXT_COOKIE, _safe_next(next_url), max_age=600)
+    return response
 
 
-@router.get("/callback", include_in_schema=False)
+@router.get("/callback")
 async def sso_callback(
     request: Request,
-    db: DbSession,
+    session: DbSession,
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
+    error_description: str | None = None,
 ):
-    if error:
-        raise HTTPException(status_code=400, detail=f"TWC OpenID authorization failed: {error}")
-    config = await _enabled_config(db)
-    if not code or not state or state != request.cookies.get(_STATE_COOKIE):
-        raise HTTPException(status_code=400, detail="Invalid TWC OpenID state")
-    nonce = request.cookies.get(_NONCE_COOKIE)
-    if not nonce:
-        raise HTTPException(status_code=400, detail="Missing TWC OpenID nonce")
-    metadata = await _oidc_metadata(config)
-    token_endpoint = metadata.get("token_endpoint")
-    client_id = config.provider_settings.client_id
-    redirect_uri = config.provider_settings.redirect_uri
-    if not token_endpoint or not client_id or not redirect_uri or config.client_secret_encrypted is None:
-        raise HTTPException(status_code=400, detail="TWC OpenID token settings are incomplete")
-    from langflow.services.database.models.auth.sso_secret import decrypt_sso_client_secret
+    _ensure_sso_enabled()
 
-    client_secret = decrypt_sso_client_secret(config.client_secret_encrypted, get_settings_service())
-    async with httpx.AsyncClient(timeout=20, verify=False, follow_redirects=True) as client:
-        token_response = await client.post(token_endpoint, data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "scope": "openid",
-        }, auth=httpx.BasicAuth(client_id, client_secret))
-    if token_response.is_error:
-        raise HTTPException(status_code=502, detail="TWC OpenID token exchange failed")
-    token_data = token_response.json()
-    access_token = token_data.get("access_token")
+    if error:
+        raise HTTPException(status_code=400, detail=error_description or error)
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Missing OAuth callback parameters")
+
+    cookie_state = request.cookies.get(SSO_STATE_COOKIE)
+    cookie_nonce = request.cookies.get(SSO_NONCE_COOKIE)
+    cookie_provider = request.cookies.get(SSO_PROVIDER_COOKIE)
+    next_url = _safe_next(request.cookies.get(SSO_NEXT_COOKIE))
+
+    if not cookie_state or not cookie_provider or not cookie_nonce:
+        raise HTTPException(status_code=400, detail="Missing SSO handshake state")
+    if cookie_state != state:
+        raise HTTPException(status_code=400, detail="Invalid SSO state")
+
+    config = await _get_config(session, cookie_provider, allowed_providers={"oauth", "oidc"})
+    metadata: dict[str, Any] = {}
+    if config.discovery_url:
+        metadata = await _fetch_discovery(config.discovery_url)
+
+    token_endpoint = config.token_endpoint or metadata.get("token_endpoint")
+    jwks_uri = config.jwks_uri or metadata.get("jwks_uri")
+    issuer = config.issuer or metadata.get("issuer")
+
+    if not token_endpoint or not jwks_uri:
+        raise HTTPException(status_code=400, detail="OAuth token/jwks endpoints are not configured")
+
+    client_secret = get_auth_service().decrypt_api_key(config.client_secret_encrypted or "")
+    if not client_secret:
+        raise HTTPException(status_code=400, detail="SSO client secret is missing")
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        token_resp = await client.post(
+            token_endpoint,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": config.redirect_uri,
+                "client_id": config.client_id,
+                "client_secret": client_secret,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        if token_resp.status_code >= 400:
+            raise HTTPException(status_code=400, detail="Failed to exchange authorization code")
+        token_data = token_resp.json()
+
     id_token = token_data.get("id_token")
-    if not isinstance(access_token, str) and not isinstance(id_token, str):
-        raise HTTPException(status_code=502, detail="TWC OpenID did not return an access token or ID token")
-    # Match Workbench's TokenBundle behavior: TWC's ID token is the primary
-    # upstream token when both fields are returned; the access token is the
-    # fallback.  The live currentUser call remains the authorization check.
-    twc_token = id_token if isinstance(id_token, str) and id_token.strip() else access_token
-    if isinstance(twc_token, str) and twc_token.strip():
-        # This is the Workbench path: TWC remains the live identity and
-        # authorization authority after the code exchange.  Do not silently
-        # turn a failed currentUser check into a local JWT-only login.
-        claims = await _claims_from_twc_token(twc_token, metadata)
-    else:
-        raise HTTPException(status_code=502, detail="TWC OpenID did not return a usable upstream token")
-    user = await _materialize_user(config, claims, db)
-    tokens = await get_auth_service().create_user_tokens(user.id, db, update_last_login=True)
-    redirect = RedirectResponse(url=_safe_next(request.cookies.get(_NEXT_COOKIE)), status_code=303)
-    _set_session_cookies(redirect, tokens, user)
-    for name in (_STATE_COOKIE, _NONCE_COOKIE, _NEXT_COOKIE):
-        redirect.delete_cookie(name, domain=get_settings_service().auth_settings.COOKIE_DOMAIN)
-    return redirect
+    if not id_token:
+        raise HTTPException(status_code=400, detail="Missing id_token in token response")
+
+    try:
+        signing_key = jwt.PyJWKClient(jwks_uri).get_signing_key_from_jwt(id_token)
+        claims = jwt.decode(
+            id_token,
+            signing_key.key,
+            audience=config.client_id,
+            issuer=issuer,
+            algorithms=["RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "HS256"],
+            options={"require": ["exp", "iat", "sub"]},
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Invalid id_token") from exc
+
+    if claims.get("nonce") != cookie_nonce:
+        raise HTTPException(status_code=400, detail="Invalid nonce")
+
+    user = await _get_or_create_sso_user(session, config, claims)
+    await get_variable_service().initialize_user_variables(user.id, session)
+    _ = await get_or_create_default_folder(session, user.id)
+
+    tokens = await get_auth_service().create_user_tokens(user_id=user.id, db=session, update_last_login=True)
+    redirect_response = RedirectResponse(url=next_url, status_code=302)
+    _set_auth_cookies(redirect_response, tokens, user)
+    _delete_cookie(redirect_response, SSO_STATE_COOKIE)
+    _delete_cookie(redirect_response, SSO_NONCE_COOKIE)
+    _delete_cookie(redirect_response, SSO_PROVIDER_COOKIE)
+    _delete_cookie(redirect_response, SSO_NEXT_COOKIE)
+    return redirect_response

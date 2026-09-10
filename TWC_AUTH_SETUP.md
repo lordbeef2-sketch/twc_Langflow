@@ -1,59 +1,166 @@
-# Langflow TWC OpenID setup
+# Teamwork Cloud Login Setup
 
-This package keeps Langflow's native users, permissions, and flow/project
-sharing. It adds one GUI-managed authentication lane for Teamwork Cloud:
-OpenID Connect (OIDC).
+This patch adds Teamwork Cloud Authentication Server login to Langflow using the TWC authorization-code flow.
 
-The installer also keeps databases created by the retired v4 overlay readable:
-its legacy compatibility columns are ignored by the current migration check, so
-an existing database does not need to be reset or manually edited.
+## Required operator config
 
-## Configure it in the GUI
+Set these values in the environment for the Langflow process:
 
-1. Launch Langflow and sign in as the local administrator.
-2. Open **Settings → OAuth SSO**.
-3. Enable TWC OpenID, then enter only the Teamwork Cloud base URL, OpenID
-   application ID, client secret, and Langflow public URL. The GUI derives the
-   callback and discovery URL for you. The patch uses the same Refresh3
-   contract as Workbench:
-   `openid` scope, AuthServer discovery on `/authentication/.well-known/oidc-configuration`,
-   authorization on `/authentication/oidc/authorize`, token exchange on
-   `/authentication/api/oidc/token` using `client_secret_basic` with
-   `scope=openid`, and live user resolution through
-   `/osmc/admin/currentUser?permission=true`. Langflow follows Workbench's
-   token precedence when TWC returns both values: the ID token is sent to the
-   live current-user endpoint first, with the access token as fallback.
-4. Save. Langflow encrypts the client secret in its database and switches the
-   live login path to TWC OpenID. No `.env` edit or hand-maintained config is
-   required.
+```env
+APP_ORIGIN=https://langflow.example.com
+TWC_PRESET_SERVERS=[{"id":"prod","name":"Production TWC","base_url":"https://twc.example.com:8111","verify_tls":true,"enabled":true,"display_order":1}]
+TWC_AUTH_CLIENT_ID=langflow-client
+TWC_AUTH_CLIENT_SECRET=replace-with-authentication-client-secret
+TWC_AUTO_LOGIN=true
+LANGFLOW_AUTO_LOGIN=false
+TWC_AUTH_CALLBACK_PATH=/api/auth/callback
+TWC_AUTH_SCOPE=openid
+TWC_SAML_LOGIN_PATH=/authentication/authorize
+TWC_SAML_LOGIN_PORT=8443
+TWC_SAML_TOKEN_PATH=/authentication/api/token
+TWC_SAML_RETURN_URL_PARAMETER=redirect_uri
+```
 
-Register this exact callback in the TWC OpenID client:
+Supported aliases:
+
+- `authentication.client.ids`
+- `authentication.client.secret`
+- `TWC_AUTHENTICATION_CLIENT_ID`
+- `TWC_AUTHENTICATION_CLIENT_IDS`
+- `TWC_AUTHENTICATION_CLIENT_SECRET`
+
+`TWC_PRESET_SERVERS` accepts:
+
+- a JSON array of server objects
+- a JSON object keyed by server id
+- a comma-separated list such as `prod=https://twc.example.com:8111`
+
+Each server object may include:
+
+```json
+{
+  "id": "prod",
+  "name": "Production TWC",
+  "base_url": "https://twc.example.com:8111",
+  "verify_tls": true,
+  "ca_bundle_path": "C:/certs/internal-ca.pem",
+  "enabled": true,
+  "display_order": 1
+}
+```
+
+Accepted server keys include:
+
+- `base_url` or `rest_url`
+- `name` or `label`
+- `verify_tls`
+- `ca_bundle_path`
+- `enabled`
+- `display_order`
+
+## Optional per-server overrides
+
+Use `TWC_AUTH_SERVER_OVERRIDES` when the Authentication Server host, path, client, or TLS behavior differs from the default derived values:
+
+```env
+TWC_AUTH_SERVER_OVERRIDES={
+  "prod": {
+    "authorize_url": "https://auth.example.com:8443/authentication/authorize",
+    "token_url": "https://auth.example.com:8443/authentication/api/token",
+    "verify_tls": "C:/certs/internal-ca.pem",
+    "scope": "openid",
+    "client_id": "langflow-client",
+    "client_secret": "replace-with-secret",
+    "return_url_parameter": "redirect_uri"
+  }
+}
+```
+
+Supported per-server override keys:
+
+- `authorize_url`
+- `token_url`
+- `login_path`
+- `login_port`
+- `token_path`
+- `return_url_parameter`
+- `scope`
+- `client_id`
+- `client_secret`
+- `authentication.client.id`
+- `authentication.client.ids`
+- `authentication_client_id`
+- `authentication_client_ids`
+- `authentication.client.secret`
+- `authentication_client_secret`
+- `verify_tls`
+- `ca_bundle_path`
+
+`verify_tls` supports:
+
+- `true`
+- `false`
+- a CA bundle path
+
+## Required TWC / AuthServer setup
+
+TWC operators must make sure:
+
+- the Langflow callback URL is whitelisted in `authentication.redirect.uri.whitelist`
+- the configured client id exists in `authentication.client.ids`
+- the configured secret matches `authentication.client.secret`
+
+For the default callback path, whitelist:
 
 ```text
-<public Langflow URL>/api/v1/sso/callback
+https://langflow.example.com/api/auth/callback
 ```
 
-The GUI hides the retired SAML lane. This patch does not add OAuth-password,
-SAML, or a second TWC authentication system. The callback path is still
-Langflow-specific (`/api/v1/sso/callback`); only the TWC AuthServer protocol
-and endpoint contract are shared with Workbench.
+Backward-compatible callback routes still exist under `/api/v1/auth/twc/callback`, but a New Project-style setup can now use `/api/auth/callback` directly.
 
-## Sharing
+## Auto SSO behavior
 
-Native Langflow flow/project sharing remains installed. After a user signs in
-through TWC OpenID, Langflow maps the TWC subject to a local user profile, so
-existing sharing and permissions apply to that user.
+Set `TWC_AUTO_LOGIN=true` to have Langflow redirect browser page requests straight into the Teamwork Cloud sign-in flow without showing the local username/password form first.
 
-## Local fallback
+Keep `LANGFLOW_AUTO_LOGIN=false`. That setting belongs to Langflow's built-in default-superuser mode and is not part of the TWC SSO flow.
 
-Keep the local administrator session open while testing the provider. The GUI
-toggle can disable the provider without editing environment files. The stock
-local login route remains available for a configured Langflow administrator.
+When `TWC_AUTO_LOGIN=true`:
 
-## Install and verify
+- unauthenticated browser requests are redirected straight to the first ready TWC server by `display_order`
+- no local username entry is required in the normal path
+- if TWC returns an error, Langflow shows an SSO error page instead of falling back to the local login form
+
+## Flow summary
+
+1. Langflow redirects the browser to `/authentication/authorize`.
+2. TWC Authentication Server handles the SAML/IdP portion.
+3. TWC redirects back to Langflow with a `code`.
+4. Langflow exchanges the code at `/authentication/api/token` using `X-Auth-Secret`.
+5. Langflow validates the returned token against `/osmc/admin/currentUser?permission=true`.
+6. Langflow keeps TWC session data server-side and uses `Authorization: Token <token>` for TWC REST calls.
+
+## Local verification
+
+Example local env:
 
 ```powershell
-.\installer.ps1 -InstallRoot . -Force
-.\launcher.ps1 -ValidateOnly
+$env:APP_ORIGIN='http://127.0.0.1:7860'
+$env:TWC_PRESET_SERVERS='[{"id":"alpha","name":"Alpha TWC","base_url":"https://alpha.example.com:8111","verify_tls":false}]'
+$env:TWC_AUTH_CLIENT_ID='langflow-client'
+$env:TWC_AUTH_CLIENT_SECRET='replace-with-secret'
+$env:TWC_AUTH_CALLBACK_PATH='/api/auth/callback'
 .\launcher.ps1
 ```
+
+Expected routes:
+
+- `GET /api/auth/servers`
+- `GET /api/auth/signin/{server_id}`
+- `GET /api/auth/callback`
+- `POST /api/auth/logout`
+- `GET /api/auth/status`
+- `GET /api/v1/auth/twc/servers`
+- `GET /api/v1/auth/twc/signin/{server_id}`
+- `GET /api/v1/auth/twc/callback`
+- `POST /api/v1/auth/twc/logout`
+- `GET /api/v1/auth/twc/status`
