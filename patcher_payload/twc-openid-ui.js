@@ -9,6 +9,7 @@
       'a[href="/settings/saml-sso"]{display:none!important}' +
       '#twc-openid-login{width:100%;margin-top:12px;padding:10px 14px;border-radius:6px;border:1px solid #6b7280;background:#111827;color:#fff;font-weight:600;cursor:pointer}' +
       '#twc-openid-login:hover{background:#1f2937}' +
+      '#twc-openid-login.twc-floating{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2147483647;width:min(360px,calc(100vw - 32px));box-shadow:0 8px 24px rgba(0,0,0,.3)}' +
       '#twc-openid-settings{margin-top:20px;padding:20px;border:1px solid hsl(var(--border));border-radius:8px;background:hsl(var(--background))}' +
       '#twc-openid-settings h3{font-size:16px;font-weight:600;margin:0 0 4px}' +
       '#twc-openid-settings p{font-size:12px;color:hsl(var(--muted-foreground));margin:0 0 16px}' +
@@ -185,9 +186,14 @@
       });
       anchor = signIn && (signIn.parentElement || signIn);
     }
-    if (!anchor) anchor = document.body;
+    var floating = false;
+    if (!anchor) {
+      anchor = document.body;
+      floating = true;
+    }
     var button = document.createElement("button");
     button.id = "twc-openid-login";
+    if (floating) button.className = "twc-floating";
     button.type = "button";
     button.textContent = "Sign in with TWC OpenID";
     button.addEventListener("click", function () {

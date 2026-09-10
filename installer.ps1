@@ -509,14 +509,14 @@ function Patch-StockLoginForTWCOpenId([string]$langflowRoot) {
 
 function Install-TwcOpenIdUi([string]$payloadRoot, [string]$frontendRoot) {
   $uiSource = Join-Path $payloadRoot "twc-openid-ui.js"
-  $uiTarget = Join-Path $frontendRoot "twc-openid-ui-v3.js"
+  $uiTarget = Join-Path $frontendRoot "twc-openid-ui-v4.js"
   if (-not (Test-Path -LiteralPath $uiSource)) { Fail "Missing TWC OpenID UI asset: $uiSource" }
   Copy-Item -LiteralPath $uiSource -Destination $uiTarget -Force
   $indexPath = Join-Path $frontendRoot "index.html"
   $index = Get-Content -LiteralPath $indexPath -Raw
-  $scriptTag = '    <script src="./twc-openid-ui-v3.js"></script>'
-  if ($index -match 'twc-openid-ui(?:-v3)?\.js') {
-    $index = [regex]::Replace($index, '\s*<script src="\.\/twc-openid-ui(?:-v3)?\.js(?:\?v=\d+)?"></script>', "`r`n$scriptTag", 1)
+  $scriptTag = '    <script src="./twc-openid-ui-v4.js"></script>'
+  if ($index -match 'twc-openid-ui(?:-v[0-9]+)?\.js') {
+    $index = [regex]::Replace($index, '\s*<script src="\.\/twc-openid-ui(?:-v[0-9]+)?\.js(?:\?v=\d+)?"></script>', "`r`n$scriptTag", 1)
   } else {
     $index = $index.Replace('</head>', "$scriptTag`r`n  </head>")
   }
