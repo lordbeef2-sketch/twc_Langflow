@@ -167,6 +167,12 @@
   function addLoginButton() {
     if (!/\/login(?:\/|$)/.test(window.location.pathname)) return;
     if (document.getElementById("twc-openid-login")) return;
+    // This integration is SSO-only. Keep the native credential lane out of
+    // the rendered page; the backend enforces the same rule below.
+    Array.prototype.slice.call(document.querySelectorAll('input[type="text"],input[type="email"],input[type="password"],button[type="submit"]')).forEach(function (field) {
+      var shell = field.parentElement;
+      if (shell) shell.style.display = "none";
+    });
     // Langflow's login markup changed: recent builds render the controls
     // without a native <form>. Anchor to the submit/password control instead
     // of silently dropping the TWC button when that wrapper is absent.

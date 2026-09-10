@@ -495,6 +495,11 @@ function Patch-StockLoginForTWCOpenId([string]$langflowRoot) {
     )
     $changed = $true
   }
+  $passwordGuard = '    if await _twc_sso_enabled(db):' + "`r`n" + '        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="TWC OpenID sign-in is required")' + "`r`n"
+  if ($content -notmatch 'TWC OpenID sign-in is required') {
+    $content = $content.Replace('    check_rate_limit(request)' + "`r`n", '    check_rate_limit(request)' + "`r`n" + $passwordGuard)
+    $changed = $true
+  }
   if ($content -notmatch 'def _langpatcher_local_only\(\)') {
     $helperBlock = 'def _langpatcher_local_only() -> bool:' + "`r`n" + '    return os.getenv("LANGPATCHER_LOCAL_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}' + "`r`n`r`n"
     $headerPattern = 'router = APIRouter\(tags=\["Login"\]\)\r?\n'
